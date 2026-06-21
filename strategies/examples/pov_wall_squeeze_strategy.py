@@ -6,6 +6,7 @@ from closed 1-minute option candles, executing trades broker-agnostically via Op
 """
 import os
 import sys
+import signal
 import time
 import logging
 from datetime import datetime, date
@@ -32,6 +33,8 @@ STRATEGY_NAME = "POV Wall-Squeeze"
 UNDERLYING = os.getenv('UNDERLYING', 'NIFTY')
 PRODUCT = "MIS"
 QUANTITY = int(os.getenv('QUANTITY', '75'))  # 1 lot default for NIFTY
+MAX_LOTS = int(os.getenv('MAX_LOTS', '1'))  # Max lots per symbol per strategy
+LOT_SIZE = QUANTITY
 
 # Strike configuration
 STRIKE_GAPS = {
@@ -181,13 +184,64 @@ def _dedup_action(symbol, action, score, entry, sl, t1, t2, t3):
     }
 
 
+# Shutdown state shared between signal handler and run loop
+_shutdown_requested = False
+_positions = {}
+_opt_exchange = None
+
+def _graceful_shutdown(signum, frame):
+    """Handle Ctrl+C / SIGTERM: close active positions, cancel pending SL orders, then exit."""
+    global _shutdown_requested
+    _shutdown_requested = True
+    sig_name = signal.Signals(signum).name
+    log.info(f"\n{'='*60}")
+    log.info(f"SHUTDOWN SIGNAL RECEIVED ({sig_name}) — cleaning up...")
+    log.info(f"{'='*60}")
+
+    if _positions and _opt_exchange:
+        for symbol, pos in list(_positions.items()):
+            # Cancel pending SL order
+            sl_oid = pos.get("sl_orderid")
+            if sl_oid:
+                try:
+                    client.cancelorder(order_id=sl_oid, strategy=STRATEGY_NAME)
+                    log.info(f"Cancelled SL order {sl_oid} for {symbol}")
+                except Exception:
+                    pass
+            # Close position to flat
+            log.info(f"Closing position: {symbol}...")
+            try:
+                resp = client.placeorder(
+                    strategy=STRATEGY_NAME,
+                    symbol=symbol,
+                    action="SELL",
+                    exchange=_opt_exchange,
+                    price_type="MARKET",
+                    product=PRODUCT,
+                    quantity=pos.get("qty", QUANTITY)
+                )
+                log.info(f"Shutdown exit response for {symbol}: {resp}")
+            except Exception as e:
+                log.error(f"Failed to close {symbol} on shutdown: {e}")
+    else:
+        log.info("No active positions — nothing to close.")
+
+    log.info("Shutdown complete. Exiting.")
+    sys.exit(0)
+
+signal.signal(signal.SIGINT, _graceful_shutdown)
+signal.signal(signal.SIGTERM, _graceful_shutdown)
+
 def run_strategy():
+    global _positions, _opt_exchange
     log.info(f"Starting POV Wall-Squeeze Strategy for underlying: {UNDERLYING}...")
     strike_gap = STRIKE_GAPS.get(UNDERLYING.upper(), 50)
     is_midcp = UNDERLYING.upper() == "MIDCPNIFTY"
     idx_exchange = _index_exchange(UNDERLYING)
     opt_exchange = _option_exchange(UNDERLYING)
-    positions = {}
+    _opt_exchange = opt_exchange
+    positions = {}  # symbol -> {qty, sl_orderid, target_price}
+    _positions = positions
 
     while True:
         try:
@@ -248,11 +302,63 @@ def run_strategy():
                 res = evaluate_pov(symbol, df_opt, is_midcp)
                 log.info(f"Symbol: {symbol} | Action: {res['action']} | Score: {res['score']}/5")
 
-                # 4. Trigger trades on STRONG / WATCH transitions
+                # 4. Manage active position exits
+                pos = positions.get(symbol)
+                if pos:
+                    sl_oid = pos.get("sl_orderid")
+                    target_price = pos.get("target_price")
+
+                    # Check if SL order already filled
+                    sl_filled = False
+                    if sl_oid:
+                        try:
+                            st = client.orderstatus(order_id=sl_oid, strategy=STRATEGY_NAME)
+                            if st.get("status") == "success" and st.get("data", {}).get("order_status") == "complete":
+                                sl_filled = True
+                        except Exception:
+                            pass
+
+                    if sl_filled:
+                        log.info(f"SL filled for {symbol}. Position closed by system.")
+                        del positions[symbol]
+                        continue
+
+                    # Check if option LTP has reached target — use smart order to close
+                    if target_price is not None and len(df_opt) >= 2:
+                        opt_ltp = df_opt.iloc[-2]["close"]  # last completed candle close
+                        if opt_ltp >= target_price:
+                            log.info(f"Target reached for {symbol}! LTP {opt_ltp:.2f} >= T1 {target_price:.2f}")
+                            # Cancel the SL order first
+                            if sl_oid:
+                                try:
+                                    client.cancelorder(order_id=sl_oid, strategy=STRATEGY_NAME)
+                                    log.info(f"Cancelled SL order {sl_oid}")
+                                except Exception:
+                                    pass
+                            # Close position with explicit quantity (not smart order)
+                            exit_resp = client.placeorder(
+                                strategy=STRATEGY_NAME,
+                                symbol=symbol,
+                                action="SELL",
+                                exchange=opt_exchange,
+                                price_type="MARKET",
+                                product=PRODUCT,
+                                quantity=pos.get("qty", QUANTITY)
+                            )
+                            del positions[symbol]
+                            continue
+
+                    continue  # skip entry check while in a position
+
+                # 5. Trigger trades on STRONG / WATCH transitions
                 if res["action"] in {"STRONG", "WATCH"} and res["is_new"]:
-                    current_pos = positions.get(symbol, 0)
-                    if current_pos <= 0:
-                        log.info(f"!!! SHORT SQUEEZE DETECTED on {symbol} !!! Placing BUY order...")
+                    if not positions.get(symbol):
+                        # Check lot limit before entry
+                        entry_qty = QUANTITY
+                        if MAX_LOTS > 1:
+                            entry_qty = min(QUANTITY, LOT_SIZE * MAX_LOTS)
+
+                        log.info(f"!!! SHORT SQUEEZE DETECTED on {symbol} !!! Placing BUY order (qty={entry_qty})...")
                         order_resp = client.placeorder(
                             strategy=STRATEGY_NAME,
                             symbol=symbol,
@@ -260,11 +366,35 @@ def run_strategy():
                             exchange=opt_exchange,
                             price_type="MARKET",
                             product=PRODUCT,
-                            quantity=QUANTITY
+                            quantity=entry_qty
                         )
-                        log.info(f"Order Response: {order_resp}")
+                        log.info(f"Entry Order Response: {order_resp}")
                         if order_resp.get("status") == "success":
-                            positions[symbol] = QUANTITY
+                            sl_orderid = None
+
+                            # Place only SL-M exit order (system fills automatically)
+                            # Target is monitored script-side to avoid double-fill race
+                            if res["sl"] is not None:
+                                sl_resp = client.placeorder(
+                                    strategy=STRATEGY_NAME,
+                                    symbol=symbol,
+                                    action="SELL",
+                                    exchange=opt_exchange,
+                                    price_type="SL-M",
+                                    trigger_price=res["sl"],
+                                    product=PRODUCT,
+                                    quantity=entry_qty
+                                )
+                                log.info(f"SL Order Response: {sl_resp}")
+                                if sl_resp.get("status") == "success":
+                                    sl_orderid = sl_resp.get("orderid")
+
+                            positions[symbol] = {
+                                "qty": entry_qty,
+                                "sl_orderid": sl_orderid,
+                                "target_price": res["t1"],
+                            }
+                            log.info(f"Trade entered: {symbol} | SL: {res['sl']} | T1: {res['t1']} | T2: {res['t2']} | T3: {res['t3']}")
 
         except Exception as e:
             log.error(f"Error in strategy execution loop: {e}")

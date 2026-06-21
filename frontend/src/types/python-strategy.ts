@@ -18,6 +18,8 @@ export interface PythonStrategy {
   schedule_days: string[]
   created_at: string
   updated_at: string
+  max_lots_nifty: number
+  max_lots_sensex: number
 }
 
 export interface PythonStrategyContent {
@@ -104,4 +106,31 @@ export const STATUS_LABELS: Record<string, string> = {
   scheduled: 'Scheduled',
   paused: 'Paused',
   manually_stopped: 'Manual Stop',
+}
+
+export interface ActiveTrade {
+  symbol: string
+  direction: 'CE' | 'PE' | 'UNKNOWN'
+  entry_price: number | null
+  stop_loss: number | null
+  target: number | null
+  current_price: number | null
+  type: 'spot_based' | 'premium_based'
+}
+
+export interface StrategyStatus {
+  status: 'success' | 'error'
+  strategy_id: string
+  is_running: boolean
+  state: 'IDLE' | 'IN_TRADE' | 'DONE' | 'INACTIVE'
+  last_updated: string | null
+  last_log_message: string
+  active_trades: ActiveTrade[]
+  indicators: {
+    regime?: string
+    phase?: string
+    velocity?: string
+    atr?: string
+    spot?: string
+  }
 }

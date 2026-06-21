@@ -1,4 +1,5 @@
 import {
+  Activity,
   AlertTriangle,
   Calendar,
   Clock,
@@ -18,6 +19,8 @@ import { Link, useNavigate } from 'react-router-dom'
 import { showToast } from '@/utils/toast'
 import { pythonStrategyApi } from '@/api/python-strategy'
 import { Alert, AlertDescription } from '@/components/ui/alert'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -41,6 +44,7 @@ import { Switch } from '@/components/ui/switch'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import type { MasterContractStatus, PythonStrategy } from '@/types/python-strategy'
 import { SCHEDULE_DAYS, STATUS_COLORS, STATUS_LABELS } from '@/types/python-strategy'
+import StrategyStatusPanel from '@/components/python-strategy/StrategyStatusPanel'
 
 export default function PythonStrategyIndex() {
   const navigate = useNavigate()
@@ -51,6 +55,59 @@ export default function PythonStrategyIndex() {
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false)
   const [strategyToDelete, setStrategyToDelete] = useState<PythonStrategy | null>(null)
   const [currentTime, setCurrentTime] = useState(new Date())
+  const [maxLotsEdits, setMaxLotsEdits] = useState<Record<string, { nifty: string; sensex: string }>>({})
+
+  const getMaxLots = (strategy: PythonStrategy) => {
+    const edit = maxLotsEdits[strategy.id]
+    return {
+      nifty: edit?.nifty ?? String(strategy.max_lots_nifty ?? 1),
+      sensex: edit?.sensex ?? String(strategy.max_lots_sensex ?? 1),
+    }
+  }
+
+  const handleMaxLotsChange = (strategyId: string, field: 'nifty' | 'sensex', value: string) => {
+    setMaxLotsEdits(prev => ({
+      ...prev,
+      [strategyId]: {
+        ...prev[strategyId] ?? {},
+        nifty: field === 'nifty' ? value : (prev[strategyId]?.nifty ?? ''),
+        sensex: field === 'sensex' ? value : (prev[strategyId]?.sensex ?? ''),
+      },
+    }))
+  }
+
+  const handleMaxLotsSave = async (strategy: PythonStrategy) => {
+    const lots = getMaxLots(strategy)
+    const niftyVal = parseInt(lots.nifty, 10)
+    const sensexVal = parseInt(lots.sensex, 10)
+    if (isNaN(niftyVal) || niftyVal < 1 || isNaN(sensexVal) || sensexVal < 1) {
+      showToast.error('Max lots must be at least 1')
+      return
+    }
+    try {
+      await pythonStrategyApi.saveMaxLots(strategy.id, {
+        max_lots_nifty: niftyVal,
+        max_lots_sensex: sensexVal,
+      })
+      showToast.success('Max lots saved')
+      // Update local state
+      setStrategies(prev =>
+        prev.map(s =>
+          s.id === strategy.id
+            ? { ...s, max_lots_nifty: niftyVal, max_lots_sensex: sensexVal }
+            : s
+        )
+      )
+      // Clear edits
+      setMaxLotsEdits(prev => {
+        const next = { ...prev }
+        delete next[strategy.id]
+        return next
+      })
+    } catch {
+      showToast.error('Failed to save max lots')
+    }
+  }
 
   const fetchData = async (silent = false) => {
     try {
@@ -365,6 +422,7 @@ export default function PythonStrategyIndex() {
           </CardContent>
         </Card>
       ) : (
+        <div className="space-y-8">
         <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3 items-start">
           {strategies.map((strategy) => (
             <Card key={strategy.id} className="relative overflow-hidden flex flex-col">
@@ -443,6 +501,39 @@ export default function PythonStrategyIndex() {
                   <p className="text-xs text-muted-foreground mt-1">
                     {formatScheduleDays(strategy.schedule_days?.length ? strategy.schedule_days : ['mon', 'tue', 'wed', 'thu', 'fri'])}
                   </p>
+                </div>
+
+                {/* Max Lots per Symbol */}
+                <div className="text-sm p-2 rounded bg-amber-500/10 border border-amber-500/20">
+                  <p className="text-xs font-medium text-amber-700 dark:text-amber-400 mb-2">Max Lots per Symbol</p>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <Label className="text-[10px] text-muted-foreground">NIFTY</Label>
+                      <Input
+                        type="number"
+                        min={1}
+                        max={100}
+                        className="h-7 text-xs font-mono"
+                        value={getMaxLots(strategy).nifty}
+                        onChange={(e) => handleMaxLotsChange(strategy.id, 'nifty', e.target.value)}
+                        onBlur={() => handleMaxLotsSave(strategy)}
+                        disabled={strategy.status === 'running'}
+                      />
+                    </div>
+                    <div>
+                      <Label className="text-[10px] text-muted-foreground">SENSEX</Label>
+                      <Input
+                        type="number"
+                        min={1}
+                        max={100}
+                        className="h-7 text-xs font-mono"
+                        value={getMaxLots(strategy).sensex}
+                        onChange={(e) => handleMaxLotsChange(strategy.id, 'sensex', e.target.value)}
+                        onBlur={() => handleMaxLotsSave(strategy)}
+                        disabled={strategy.status === 'running'}
+                      />
+                    </div>
+                  </div>
                 </div>
 
                 {/* Error Message */}
@@ -535,6 +626,24 @@ export default function PythonStrategyIndex() {
               </CardContent>
             </Card>
           ))}
+        </div>
+
+        {/* Strategy Live Monitor */}
+        {strategies.some(s => s.status === 'running') && (
+          <div className="space-y-4 pt-4 border-t">
+            <h3 className="text-lg font-bold tracking-tight flex items-center gap-2">
+              <Activity className="h-5 w-5 text-green-500 animate-pulse" />
+              Strategy Live Monitor
+            </h3>
+            <div className="grid gap-4 grid-cols-1">
+              {strategies
+                .filter(s => s.status === 'running')
+                .map((strategy) => (
+                  <StrategyStatusPanel key={`monitor-${strategy.id}`} strategy={strategy} />
+                ))}
+            </div>
+          </div>
+        )}
         </div>
       )}
 

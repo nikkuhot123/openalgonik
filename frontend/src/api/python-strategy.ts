@@ -6,6 +6,7 @@ import type {
   PythonStrategy,
   PythonStrategyContent,
   ScheduleConfig,
+  StrategyStatus,
 } from '@/types/python-strategy'
 import type { ApiResponse } from '@/types/trading'
 import { webClient } from './client'
@@ -209,6 +210,31 @@ export const pythonStrategyApi = {
   checkAndStartPending: async (): Promise<ApiResponse<{ started: number }>> => {
     const response =
       await webClient.post<ApiResponse<{ started: number }>>('/python/check-contracts')
+    return response.data
+  },
+
+  /**
+   * Get live status of a running strategy (parsed from logs)
+   */
+  getStrategyStatus: async (strategyId: string): Promise<StrategyStatus> => {
+    const response = await webClient.get<StrategyStatus>(
+      `/python/api/strategy/${strategyId}/status`
+    )
+    return response.data
+  },
+
+  /**
+   * Save max lots per underlying for a strategy
+   */
+  saveMaxLots: async (
+    strategyId: string,
+    maxLots: { max_lots_nifty?: number; max_lots_sensex?: number }
+  ): Promise<{ status: string; max_lots_nifty: number; max_lots_sensex: number }> => {
+    const response = await webClient.post<{
+      status: string
+      max_lots_nifty: number
+      max_lots_sensex: number
+    }>(`/python/api/strategy/${strategyId}/max-lots`, maxLots)
     return response.data
   },
 }

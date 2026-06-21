@@ -12,6 +12,7 @@ import os
 import platform
 import queue
 import signal
+import re
 import subprocess
 import sys
 import threading
@@ -518,6 +519,17 @@ def start_strategy_process(strategy_id):
                         strategy_env["OPENALGO_API_KEY"] = _api_key
             except Exception as e:
                 logger.warning(f"Could not inject API key for strategy {strategy_id}: {e}")
+            # Inject max lots config as environment variables
+            max_nifty = str(config.get("max_lots_nifty", 1))
+            max_sensex = str(config.get("max_lots_sensex", 1))
+            strategy_env["MAX_LOTS_NIFTY"] = max_nifty
+            strategy_env["MAX_LOTS_SENSEX"] = max_sensex
+            # Set generic MAX_LOTS based on exchange
+            exchange_code = normalize_exchange(config.get("exchange"))
+            if exchange_code in ("BSE", "BFO", "BSE_INDEX"):
+                strategy_env["MAX_LOTS"] = max_sensex
+            else:
+                strategy_env["MAX_LOTS"] = max_nifty
             subprocess_args["env"] = strategy_env
 
             # Start the process
@@ -2222,6 +2234,8 @@ def api_get_strategies():
                 "paused_message": config.get("paused_message"),
                 "process_id": config.get("process_id"),
                 "created_at": config.get("created_at"),
+                "max_lots_nifty": config.get("max_lots_nifty", 1),
+                "max_lots_sensex": config.get("max_lots_sensex", 1),
             }
         )
 
@@ -2317,6 +2331,8 @@ def api_get_strategy(strategy_id):
                 "paused_message": config.get("paused_message"),
                 "process_id": config.get("process_id"),
                 "created_at": config.get("created_at"),
+                "max_lots_nifty": config.get("max_lots_nifty", 1),
+                "max_lots_sensex": config.get("max_lots_sensex", 1),
             }
         }
     )
@@ -2450,6 +2466,275 @@ def api_get_log_content(strategy_id, log_name):
         logger.exception(f"Error reading log file: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
+
+def tail_file(filepath, lines_count=200):
+    """Efficiently read the last N lines of a file using reverse binary seek."""
+    try:
+        with open(filepath, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            file_size = f.tell()
+            if file_size == 0:
+                return []
+
+            chunk_size = 8192
+            lines = []
+            remaining = file_size
+
+            while remaining > 0 and len(lines) <= lines_count:
+                read_size = min(chunk_size, remaining)
+                remaining -= read_size
+                f.seek(remaining)
+                chunk = f.read(read_size)
+                lines = chunk.split(b"\n") + lines
+
+            # Decode and return last N non-empty lines
+            decoded = []
+            for raw in lines:
+                try:
+                    decoded.append(raw.decode("utf-8", errors="replace"))
+                except Exception:
+                    decoded.append(raw.decode("latin-1", errors="replace"))
+            # Filter empty trailing lines and return last lines_count
+            decoded = [l for l in decoded if l.strip()]
+            return decoded[-lines_count:]
+    except Exception:
+        return []
+
+
+def parse_strategy_log_file(filepath, is_running):
+    """Parse the last 200 lines of a strategy log file to extract live state."""
+    result = {
+        "state": "INACTIVE" if not is_running else "IDLE",
+        "active_trades": [],
+        "indicators": {},
+        "last_updated": None,
+        "last_log_message": None,
+    }
+
+    lines = tail_file(filepath, 200)
+    if not lines:
+        return result
+
+    # Extract timestamp and message from last line
+    last_line = lines[-1]
+    result["last_log_message"] = last_line
+    ts_match = re.match(r"^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})", last_line)
+    if ts_match:
+        result["last_updated"] = ts_match.group(1)
+
+    pending_symbol = None
+    active_trade = None
+
+    for line in lines:
+        # Extract message part after log prefix
+        msg_match = re.match(r"^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}[,\d]*\s+\[(\w+)\]\s+(.*)", line)
+        if not msg_match:
+            continue
+        msg = msg_match.group(2)
+
+        # --- State detection ---
+        if "Before entry window" in msg or "New trading day" in msg or "Returning to IDLE" in msg:
+            result["state"] = "IDLE"
+            active_trade = None
+
+        elif "Past entry window" in msg or "Done for today" in msg:
+            result["state"] = "DONE"
+            active_trade = None
+
+        # --- Symbol capture from BUY order ---
+        elif "Placing BUY order for" in msg:
+            sym_match = re.search(r"Placing BUY order for\s+(\S+)", msg)
+            if sym_match:
+                pending_symbol = sym_match.group(1).rstrip(".")
+
+        # --- Entry detection ---
+        elif "Entered Trade!" in msg or "Trade entered:" in msg:
+            result["state"] = "IN_TRADE"
+            trade = {
+                "symbol": pending_symbol or "UNKNOWN",
+                "direction": None,
+                "entry_price": None,
+                "stop_loss": None,
+                "target": None,
+                "current_price": None,
+                "type": None,
+            }
+            # Parse pipe-delimited key-value pairs
+            parts = msg.split("|")
+            for part in parts:
+                part = part.strip()
+                if ":" in part:
+                    key, _, val = part.partition(":")
+                    key = key.strip().lower()
+                    val = val.strip()
+                    if key in ("spot entry", "entry", "entry_spot"):
+                        try:
+                            trade["entry_price"] = float(val)
+                        except (ValueError, TypeError):
+                            pass
+                    elif key in ("sl", "stop_loss", "stop-loss", "stoploss"):
+                        try:
+                            trade["stop_loss"] = float(val)
+                        except (ValueError, TypeError):
+                            pass
+                    elif key in ("target", "t1", "target_spot"):
+                        try:
+                            trade["target"] = float(val)
+                        except (ValueError, TypeError):
+                            pass
+                    elif key in ("direction", "dir", "side"):
+                        trade["direction"] = val.upper()
+                    elif key in ("type", "option_type"):
+                        trade["type"] = val.upper()
+            # Infer direction from type if not set
+            if not trade["direction"] and trade["type"]:
+                if trade["type"] == "CE":
+                    trade["direction"] = "LONG"
+                elif trade["type"] == "PE":
+                    trade["direction"] = "SHORT"
+            active_trade = trade
+            result["active_trades"] = [trade]
+
+        # --- Monitoring: update current price ---
+        elif "Monitoring Trade:" in msg or "Monitoring:" in msg:
+            if active_trade:
+                result["state"] = "IN_TRADE"
+                parts = msg.split("|")
+                for part in parts:
+                    part = part.strip()
+                    if ":" in part:
+                        key, _, val = part.partition(":")
+                        key = key.strip().lower()
+                        val = val.strip()
+                        if key == "spot":
+                            try:
+                                active_trade["current_price"] = float(val)
+                            except (ValueError, TypeError):
+                                pass
+                        elif key in ("sl", "stop_loss"):
+                            try:
+                                active_trade["stop_loss"] = float(val)
+                            except (ValueError, TypeError):
+                                pass
+                        elif key in ("target", "t1"):
+                            try:
+                                active_trade["target"] = float(val)
+                            except (ValueError, TypeError):
+                                pass
+                result["active_trades"] = [active_trade]
+
+        # --- Exit detection ---
+        elif any(x in msg for x in ("Stop-Loss Hit", "Target Hit", "SL filled", "Target reached", "Closing position")):
+            result["state"] = "DONE" if is_running else "INACTIVE"
+            active_trade = None
+            result["active_trades"] = []
+
+        # --- Indicator extraction ---
+        if "Regime:" in msg or "Phase:" in msg or "Velocity:" in msg or "ATR:" in msg:
+            parts = msg.split("|")
+            for part in parts:
+                part = part.strip()
+                if ":" in part:
+                    key, _, val = part.partition(":")
+                    key = key.strip().lower()
+                    val = val.strip()
+                    if key in ("regime", "phase"):
+                        result["indicators"][key] = val
+                    elif key in ("velocity", "atr", "spot"):
+                        try:
+                            result["indicators"][key] = float(val)
+                        except (ValueError, TypeError):
+                            result["indicators"][key] = val
+
+    return result
+
+
+@python_strategy_bp.route("/api/strategy/<strategy_id>/status")
+@check_session_validity
+def api_get_strategy_status(strategy_id):
+    """API: Get real-time strategy status by parsing its log file."""
+    if strategy_id not in STRATEGY_CONFIGS:
+        return jsonify({"status": "error", "message": "Strategy not found"}), 404
+
+    config = STRATEGY_CONFIGS[strategy_id]
+    is_running = config.get("is_running", False)
+
+    # Check JSON sidecar first
+    sidecar_path = LOGS_DIR / f"{strategy_id}_status.json"
+    if sidecar_path.exists():
+        try:
+            with open(sidecar_path, "r", encoding="utf-8") as f:
+                sidecar_data = json.load(f)
+            sidecar_data["status"] = "success"
+            sidecar_data["strategy_id"] = strategy_id
+            sidecar_data["is_running"] = is_running
+            return jsonify(sidecar_data)
+        except Exception:
+            pass  # Fall through to log parsing
+
+    # Find the latest log file for this strategy
+    log_files = sorted(
+        LOGS_DIR.glob(f"{strategy_id}_*.log"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+
+    if not log_files:
+        return jsonify({
+            "status": "success",
+            "strategy_id": strategy_id,
+            "is_running": is_running,
+            "state": "INACTIVE",
+            "active_trades": [],
+            "indicators": {},
+            "last_updated": None,
+            "last_log_message": None,
+        })
+
+    parsed = parse_strategy_log_file(str(log_files[0]), is_running)
+    return jsonify({
+        "status": "success",
+        "strategy_id": strategy_id,
+        "is_running": is_running,
+        "state": parsed["state"],
+        "active_trades": parsed["active_trades"],
+        "indicators": parsed["indicators"],
+        "last_updated": parsed["last_updated"],
+        "last_log_message": parsed["last_log_message"],
+    })
+
+
+@python_strategy_bp.route("/api/strategy/<strategy_id>/max-lots", methods=["POST"])
+@check_session_validity
+def api_save_max_lots(strategy_id):
+    """API: Save max lots per underlying for a strategy."""
+    if strategy_id not in STRATEGY_CONFIGS:
+        return jsonify({"status": "error", "message": "Strategy not found"}), 404
+
+    data = request.json or {}
+    max_nifty = data.get("max_lots_nifty")
+    max_sensex = data.get("max_lots_sensex")
+
+    if max_nifty is not None:
+        try:
+            val = int(max_nifty)
+            STRATEGY_CONFIGS[strategy_id]["max_lots_nifty"] = max(1, min(val, 100))
+        except (ValueError, TypeError):
+            return jsonify({"status": "error", "message": "Invalid max_lots_nifty value"}), 400
+
+    if max_sensex is not None:
+        try:
+            val = int(max_sensex)
+            STRATEGY_CONFIGS[strategy_id]["max_lots_sensex"] = max(1, min(val, 100))
+        except (ValueError, TypeError):
+            return jsonify({"status": "error", "message": "Invalid max_lots_sensex value"}), 400
+
+    save_configs()
+    return jsonify({
+        "status": "success",
+        "max_lots_nifty": STRATEGY_CONFIGS[strategy_id].get("max_lots_nifty", 1),
+        "max_lots_sensex": STRATEGY_CONFIGS[strategy_id].get("max_lots_sensex", 1),
+    })
 
 @python_strategy_bp.route("/edit/<strategy_id>")
 @check_session_validity

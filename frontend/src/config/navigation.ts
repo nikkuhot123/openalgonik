@@ -38,6 +38,7 @@ export const navItems: NavItem[] = [
   { href: '/action-center', label: 'Action Center', icon: Bell },
   { href: '/platforms', label: 'Platforms', icon: Layers },
   { href: '/strategy', label: 'Strategy', icon: Code2 },
+  { href: '/python', label: 'Python', icon: Code2 },
   { href: '/logs', label: 'Logs', icon: FileBarChart },
   { href: '/tools', label: 'Tools', icon: Wrench },
 ]
@@ -49,6 +50,7 @@ export const bottomNavItems: NavItem[] = [
   { href: '/tradebook', label: 'Tradebook', icon: FileText },
   { href: '/positions', label: 'Positions', icon: TrendingUp },
   { href: '/strategy', label: 'Strategy', icon: Code2 },
+  { href: '/python', label: 'Python', icon: Code2 },
 ]
 
 // Paths in bottom nav (for filtering mobile sheet items)
@@ -84,6 +86,9 @@ export const externalLinks = {
 export function isActiveRoute(pathname: string, href: string): boolean {
   if (href === '/strategy') {
     return pathname.startsWith('/strategy')
+  }
+  if (href === '/python') {
+    return pathname.startsWith('/python')
   }
   return pathname === href
 }
