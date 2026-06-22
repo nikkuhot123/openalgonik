@@ -21,6 +21,8 @@ export interface PythonStrategy {
   max_lots_nifty: number
   max_lots_sensex: number
   underlying: 'NIFTY' | 'SENSEX'
+  lot_mode: 'manual' | 'auto'
+  risk_pct_per_trade: number
 }
 
 export interface PythonStrategyContent {

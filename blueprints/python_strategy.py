@@ -532,6 +532,9 @@ def start_strategy_process(strategy_id):
                 strategy_env["MAX_LOTS"] = max_nifty
             # Inject underlying
             strategy_env["UNDERLYING"] = config.get("underlying", "NIFTY")
+            # Inject lot mode + risk percentage for auto-lot sizing
+            strategy_env["LOT_MODE"] = config.get("lot_mode", "manual")
+            strategy_env["RISK_PCT_PER_TRADE"] = str(config.get("risk_pct_per_trade", 1.0))
             subprocess_args["env"] = strategy_env
 
             # Start the process
@@ -2239,6 +2242,8 @@ def api_get_strategies():
                 "max_lots_nifty": config.get("max_lots_nifty", 1),
                 "max_lots_sensex": config.get("max_lots_sensex", 1),
                 "underlying": config.get("underlying", "NIFTY"),
+                "lot_mode": config.get("lot_mode", "manual"),
+                "risk_pct_per_trade": config.get("risk_pct_per_trade", 1.0),
             }
         )
 
@@ -2337,6 +2342,8 @@ def api_get_strategy(strategy_id):
                 "max_lots_nifty": config.get("max_lots_nifty", 1),
                 "max_lots_sensex": config.get("max_lots_sensex", 1),
                 "underlying": config.get("underlying", "NIFTY"),
+                "lot_mode": config.get("lot_mode", "manual"),
+                "risk_pct_per_trade": config.get("risk_pct_per_trade", 1.0),
             }
         }
     )
@@ -2821,12 +2828,31 @@ def api_save_max_lots(strategy_id):
         else:
             return jsonify({"status": "error", "message": "Invalid underlying. Must be NIFTY or SENSEX."}), 400
 
+    # Save lot mode
+    lot_mode = data.get("lot_mode")
+    if lot_mode is not None:
+        if lot_mode in ("manual", "auto"):
+            STRATEGY_CONFIGS[strategy_id]["lot_mode"] = lot_mode
+        else:
+            return jsonify({"status": "error", "message": "Invalid lot_mode. Must be 'manual' or 'auto'."}), 400
+
+    # Save risk percentage per trade
+    risk_pct = data.get("risk_pct_per_trade")
+    if risk_pct is not None:
+        try:
+            val = float(risk_pct)
+            STRATEGY_CONFIGS[strategy_id]["risk_pct_per_trade"] = max(0.1, min(val, 10.0))
+        except (ValueError, TypeError):
+            return jsonify({"status": "error", "message": "Invalid risk_pct_per_trade value"}), 400
+
     save_configs()
     return jsonify({
         "status": "success",
         "max_lots_nifty": STRATEGY_CONFIGS[strategy_id].get("max_lots_nifty", 1),
         "max_lots_sensex": STRATEGY_CONFIGS[strategy_id].get("max_lots_sensex", 1),
         "underlying": STRATEGY_CONFIGS[strategy_id].get("underlying", "NIFTY"),
+        "lot_mode": STRATEGY_CONFIGS[strategy_id].get("lot_mode", "manual"),
+        "risk_pct_per_trade": STRATEGY_CONFIGS[strategy_id].get("risk_pct_per_trade", 1.0),
     })
 
 @python_strategy_bp.route("/edit/<strategy_id>")

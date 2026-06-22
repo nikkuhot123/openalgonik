@@ -224,18 +224,26 @@ export const pythonStrategyApi = {
   },
 
   /**
-   * Save strategy settings (max lots, underlying symbol)
+   * Save strategy settings (max lots, underlying, lot mode, risk %)
    */
   saveStrategySettings: async (
     strategyId: string,
-    settings: { max_lots_nifty?: number; max_lots_sensex?: number; underlying?: string }
-  ): Promise<{ status: string; max_lots_nifty: number; max_lots_sensex: number; underlying: string }> => {
-    const response = await webClient.post<{
-      status: string
-      max_lots_nifty: number
-      max_lots_sensex: number
-      underlying: string
-    }>(`/python/api/strategy/${strategyId}/max-lots`, settings)
-    return response.data
+    settings: {
+      max_lots_nifty?: number
+      max_lots_sensex?: number
+      underlying?: string
+      lot_mode?: 'manual' | 'auto'
+      risk_pct_per_trade?: number
+    }
+  ): Promise<{
+    status: string
+    max_lots_nifty: number
+    max_lots_sensex: number
+    underlying: string
+    lot_mode: string
+    risk_pct_per_trade: number
+  }> => {
+    const response = await webClient.post(`/python/api/strategy/${strategyId}/max-lots`, settings)
+    return response.data as any
   },
 }

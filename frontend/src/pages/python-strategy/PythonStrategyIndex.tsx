@@ -55,7 +55,7 @@ export default function PythonStrategyIndex() {
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false)
   const [strategyToDelete, setStrategyToDelete] = useState<PythonStrategy | null>(null)
   const [currentTime, setCurrentTime] = useState(new Date())
-  const [settingsEdits, setSettingsEdits] = useState<Record<string, { nifty: string; sensex: string; underlying: string }>>({})
+  const [settingsEdits, setSettingsEdits] = useState<Record<string, { nifty?: string; sensex?: string; underlying?: string; lotMode?: string; riskPct?: string }>>({})
 
   const getSettings = (strategy: PythonStrategy) => {
     const edit = settingsEdits[strategy.id]
@@ -63,6 +63,8 @@ export default function PythonStrategyIndex() {
       nifty: edit?.nifty ?? String(strategy.max_lots_nifty ?? 1),
       sensex: edit?.sensex ?? String(strategy.max_lots_sensex ?? 1),
       underlying: edit?.underlying ?? (strategy.underlying ?? 'NIFTY'),
+      lotMode: edit?.lotMode ?? (strategy.lot_mode ?? 'manual'),
+      riskPct: edit?.riskPct ?? String(strategy.risk_pct_per_trade ?? 1.0),
     }
   }
 
@@ -73,26 +75,31 @@ export default function PythonStrategyIndex() {
     })
   }
 
-  const handleSettingsSave = async (strategy: PythonStrategy, fields?: { underlying?: string }) => {
+  const handleSettingsSave = async (strategy: PythonStrategy) => {
     const s = getSettings(strategy)
     const niftyVal = parseInt(s.nifty, 10)
     const sensexVal = parseInt(s.sensex, 10)
+    const riskPctVal = parseFloat(s.riskPct)
     if (isNaN(niftyVal) || niftyVal < 1 || isNaN(sensexVal) || sensexVal < 1) {
       showToast.error('Max lots must be at least 1')
+      return
+    }
+    if (isNaN(riskPctVal) || riskPctVal < 0.1 || riskPctVal > 10) {
+      showToast.error('Risk % must be between 0.1 and 10')
       return
     }
     try {
       const payload: any = {
         max_lots_nifty: niftyVal,
         max_lots_sensex: sensexVal,
-        underlying: fields?.underlying ?? s.underlying,
+        risk_pct_per_trade: riskPctVal,
       }
       await pythonStrategyApi.saveStrategySettings(strategy.id, payload)
       showToast.success('Settings saved')
       setStrategies(prev =>
         prev.map(st =>
           st.id === strategy.id
-            ? { ...st, max_lots_nifty: niftyVal, max_lots_sensex: sensexVal, underlying: payload.underlying }
+            ? { ...st, max_lots_nifty: niftyVal, max_lots_sensex: sensexVal, risk_pct_per_trade: riskPctVal }
             : st
         )
       )
@@ -103,6 +110,18 @@ export default function PythonStrategyIndex() {
       })
     } catch {
       showToast.error('Failed to save settings')
+    }
+  }
+
+  const handleLotModeToggle = async (strategy: PythonStrategy, mode: 'manual' | 'auto') => {
+    try {
+      await pythonStrategyApi.saveStrategySettings(strategy.id, { lot_mode: mode })
+      showToast.success(`Switched to ${mode === 'auto' ? 'Auto' : 'Manual'} lot mode`)
+      setStrategies(prev =>
+        prev.map(st => st.id === strategy.id ? { ...st, lot_mode: mode } : st)
+      )
+    } catch {
+      showToast.error('Failed to switch lot mode')
     }
   }
 
@@ -500,9 +519,9 @@ export default function PythonStrategyIndex() {
                   </p>
                 </div>
 
-                {/* Symbol & Max Lots */}
-                <div className="text-sm p-2 rounded bg-amber-500/10 border border-amber-500/20">
-                  <div className="flex items-center justify-between mb-2">
+                {/* Trading Settings */}
+                <div className="text-sm p-2 rounded bg-amber-500/10 border border-amber-500/20 space-y-2">
+                  <div className="flex items-center justify-between">
                     <p className="text-xs font-medium text-amber-700 dark:text-amber-400">Trading Settings</p>
                     <span className={`px-2 py-0.5 text-[10px] font-bold rounded ${
                       strategy.underlying === 'SENSEX'
@@ -512,18 +531,58 @@ export default function PythonStrategyIndex() {
                       {strategy.underlying ?? 'NIFTY'}
                     </span>
                   </div>
-                  <div>
-                    <Label className="text-[10px] text-muted-foreground">Max Lots</Label>
-                    <Input
-                      type="number"
-                      min={1}
-                      max={100}
-                      className="h-7 text-xs font-mono"
-                      value={getSettings(strategy).nifty}
-                      onChange={(e) => handleSettingsChange(strategy.id, 'nifty', e.target.value)}
-                      onBlur={() => handleSettingsSave(strategy)}
-                      disabled={strategy.status === 'running'}
-                    />
+
+                  {/* Lot Mode Toggle */}
+                  <div className="flex rounded-md overflow-hidden border border-amber-500/30 text-[10px]">
+                    {(['manual', 'auto'] as const).map((mode) => (
+                      <button
+                        key={mode}
+                        type="button"
+                        className={`flex-1 px-2 py-1 font-semibold transition-colors ${
+                          getSettings(strategy).lotMode === mode
+                            ? 'bg-amber-500 text-white'
+                            : 'bg-transparent text-amber-700 dark:text-amber-400 hover:bg-amber-500/20'
+                        }`}
+                        disabled={strategy.status === 'running'}
+                        onClick={() => handleLotModeToggle(strategy, mode)}
+                      >
+                        {mode === 'manual' ? 'Manual Lots' : 'Auto Lots'}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <Label className="text-[10px] text-muted-foreground">
+                        {getSettings(strategy).lotMode === 'auto' ? 'Hard Cap (Lots)' : 'Max Lots'}
+                      </Label>
+                      <Input
+                        type="number"
+                        min={1}
+                        max={100}
+                        className="h-7 text-xs font-mono"
+                        value={getSettings(strategy).nifty}
+                        onChange={(e) => handleSettingsChange(strategy.id, 'nifty', e.target.value)}
+                        onBlur={() => handleSettingsSave(strategy)}
+                        disabled={strategy.status === 'running'}
+                      />
+                    </div>
+                    <div>
+                      <Label className={`text-[10px] ${getSettings(strategy).lotMode === 'auto' ? 'text-muted-foreground' : 'text-muted-foreground/40'}`}>
+                        Risk % / Trade
+                      </Label>
+                      <Input
+                        type="number"
+                        step={0.1}
+                        min={0.1}
+                        max={10}
+                        className="h-7 text-xs font-mono"
+                        value={getSettings(strategy).riskPct}
+                        onChange={(e) => handleSettingsChange(strategy.id, 'riskPct', e.target.value)}
+                        onBlur={() => handleSettingsSave(strategy)}
+                        disabled={strategy.status === 'running' || getSettings(strategy).lotMode !== 'auto'}
+                      />
+                    </div>
                   </div>
                 </div>
 

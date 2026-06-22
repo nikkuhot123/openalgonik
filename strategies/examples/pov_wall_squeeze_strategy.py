@@ -36,6 +36,8 @@ PRODUCT = "MIS"
 QUANTITY = int(os.getenv('QUANTITY', '0'))  # 0 = auto-detect from exchange
 MAX_LOTS = int(os.getenv('MAX_LOTS', '1'))
 LOT_SIZE = QUANTITY
+LOT_MODE = os.getenv('LOT_MODE', 'manual').lower()
+RISK_PCT_PER_TRADE = float(os.getenv('RISK_PCT_PER_TRADE', '1.0'))
 
 # Strike configuration
 STRIKE_GAPS = {
@@ -111,6 +113,30 @@ def reconcile_orphan_positions(underlying):
     except Exception as e:
         log.debug(f"Reconcile failed: {e}")
     return found
+
+def fetch_available_capital():
+    """Query funds API for current available cash. Returns float or None."""
+    try:
+        resp = client.funds()
+        if isinstance(resp, dict) and resp.get("status") == "success":
+            data = resp.get("data", {})
+            cash = data.get("availablecash")
+            if cash is not None:
+                return float(cash)
+    except Exception as e:
+        log.warning(f"Failed to fetch capital: {e}")
+    return None
+
+def compute_auto_lots(capital, risk_pct, max_loss_per_unit, lot_size, hard_cap_lots):
+    """Compute lot count from risk budget. max_loss_per_unit is in rupees per single contract."""
+    if max_loss_per_unit <= 0 or lot_size <= 0:
+        return 1
+    risk_budget = capital * (risk_pct / 100.0)
+    max_loss_per_lot = max_loss_per_unit * lot_size
+    if max_loss_per_lot <= 0:
+        return 1
+    auto_lots = int(risk_budget / max_loss_per_lot)
+    return max(1, min(auto_lots, hard_cap_lots))
 
 PRE_OI_MIN = 50000
 PRE_LOOKBACK = 4
@@ -189,15 +215,15 @@ def evaluate_pov(symbol, df, is_midcp=False):
     # Format data to list of dicts
     candles = df.tail(10).to_dict(orient='records')
 
-    cur = candles[-2]  # Use -2 to avoid the currently forming partial candle
-    prev = candles[-3]
+    cur = candles[-1]   # Most recent CLOSED candle (broker returns only closed bars)
+    prev = candles[-2]
 
-    # Require recent positive OI build-up into the trigger candle
-    pos_oi_sum = sum(max(0, c.get("oi_change", 0)) for c in candles[-PRE_LOOKBACK-1:-1])
+    # Require recent positive OI build-up into the trigger candle (last PRE_LOOKBACK candles incl. cur)
+    pos_oi_sum = sum(max(0, c.get("oi_change", 0)) for c in candles[-PRE_LOOKBACK:])
     if pos_oi_sum < PRE_OI_MIN:
         return _dedup_action(symbol, "WAIT", 0, None, None, None, None, None)
 
-    last5_vols = [c.get("volume", 0) for c in candles[-7:-2]]
+    last5_vols = [c.get("volume", 0) for c in candles[-6:-1]]
     avg_vol = sum(last5_vols) / len(last5_vols) if last5_vols else 0
     c1 = cur.get("volume", 0) > avg_vol * VOL_MULT
 
@@ -514,12 +540,7 @@ def run_strategy():
                             log.info(f"Symbol {symbol} locked by another strategy. Skipping this signal.")
                             continue
 
-                        # Check lot limit before entry
-                        entry_qty = QUANTITY
-                        if MAX_LOTS > 1:
-                            entry_qty = min(QUANTITY, LOT_SIZE * MAX_LOTS)
-
-                        # Capture entry option price for P&L tracking
+                        # Capture entry option price (needed for both P&L tracking and auto-lot)
                         entry_opt_price = None
                         try:
                             opt_q = client.quotes(symbol=symbol, exchange=opt_exchange)
@@ -527,6 +548,21 @@ def run_strategy():
                                 entry_opt_price = float(opt_q["data"]["ltp"])
                         except Exception:
                             pass
+
+                        # Compute entry quantity based on LOT_MODE
+                        if LOT_MODE == "auto" and entry_opt_price is not None and res["sl"] is not None:
+                            capital = fetch_available_capital()
+                            if capital is not None and capital > 0:
+                                # POV uses premium-based SL → max loss = entry - SL per unit
+                                max_loss_per_unit = max(entry_opt_price - res["sl"], 0.5)
+                                lots = compute_auto_lots(capital, RISK_PCT_PER_TRADE, max_loss_per_unit, LOT_SIZE, MAX_LOTS)
+                                entry_qty = lots * LOT_SIZE
+                                log.info(f"AUTO-LOT: capital ₹{capital:.0f} | risk {RISK_PCT_PER_TRADE}% | loss/unit ₹{max_loss_per_unit:.2f} → {lots} lots × {LOT_SIZE} = {entry_qty} qty")
+                            else:
+                                entry_qty = LOT_SIZE
+                                log.warning("AUTO-LOT: capital unavailable, falling back to 1 lot")
+                        else:
+                            entry_qty = LOT_SIZE * MAX_LOTS
 
                         log.info(f"!!! SHORT SQUEEZE DETECTED on {symbol} !!! Placing BUY order (qty={entry_qty})...")
                         order_resp = client.placeorder(

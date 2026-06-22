@@ -36,6 +36,8 @@ PRODUCT = os.getenv('PRODUCT', 'MIS')
 QUANTITY = int(os.getenv('QUANTITY', '0'))  # 0 = auto-detect from exchange
 MAX_LOTS = int(os.getenv('MAX_LOTS', '1'))
 LOT_SIZE = QUANTITY  # Will be updated at startup if auto-detected
+LOT_MODE = os.getenv('LOT_MODE', 'manual').lower()  # 'manual' or 'auto'
+RISK_PCT_PER_TRADE = float(os.getenv('RISK_PCT_PER_TRADE', '1.0'))
 
 # Strike configuration
 STRIKE_GAPS = {
@@ -115,6 +117,30 @@ def reconcile_orphan_position(underlying):
     except Exception as e:
         log.debug(f"Reconcile failed: {e}")
     return None
+
+def fetch_available_capital():
+    """Query funds API for current available cash. Returns float or None."""
+    try:
+        resp = client.funds()
+        if isinstance(resp, dict) and resp.get("status") == "success":
+            data = resp.get("data", {})
+            cash = data.get("availablecash")
+            if cash is not None:
+                return float(cash)
+    except Exception as e:
+        log.warning(f"Failed to fetch capital: {e}")
+    return None
+
+def compute_auto_lots(capital, risk_pct, max_loss_per_unit, lot_size, hard_cap_lots):
+    """Compute lot count from risk budget. max_loss_per_unit is in rupees per single contract."""
+    if max_loss_per_unit <= 0 or lot_size <= 0:
+        return 1
+    risk_budget = capital * (risk_pct / 100.0)
+    max_loss_per_lot = max_loss_per_unit * lot_size
+    if max_loss_per_lot <= 0:
+        return 1
+    auto_lots = int(risk_budget / max_loss_per_lot)
+    return max(1, min(auto_lots, hard_cap_lots))
 
 def get_nearest_expiry(underlying, exchange):
     try:
@@ -521,12 +547,7 @@ def run_strategy():
                         time.sleep(15)
                         continue
 
-                    # Check lot limit before entry
-                    entry_qty = QUANTITY
-                    if MAX_LOTS > 1:
-                        entry_qty = min(QUANTITY, LOT_SIZE * MAX_LOTS)
-
-                    # Capture option entry price for P&L tracking
+                    # Capture option entry price (needed for both P&L tracking and auto-lot)
                     entry_opt_price = None
                     try:
                         opt_q = client.quotes(symbol=opt_symbol, exchange=opt_exchange)
@@ -534,6 +555,21 @@ def run_strategy():
                             entry_opt_price = float(opt_q["data"]["ltp"])
                     except Exception:
                         pass
+
+                    # Compute entry quantity based on LOT_MODE
+                    if LOT_MODE == "auto" and entry_opt_price is not None:
+                        capital = fetch_available_capital()
+                        if capital is not None and capital > 0:
+                            # HA-EMA uses spot-based SL → worst case is full premium loss per unit
+                            lots = compute_auto_lots(capital, RISK_PCT_PER_TRADE, entry_opt_price, LOT_SIZE, MAX_LOTS)
+                            entry_qty = lots * LOT_SIZE
+                            log.info(f"AUTO-LOT: capital ₹{capital:.0f} | risk {RISK_PCT_PER_TRADE}% → {lots} lots × {LOT_SIZE} = {entry_qty} qty (cap: {MAX_LOTS} lots)")
+                        else:
+                            entry_qty = LOT_SIZE  # fallback to 1 lot
+                            log.warning(f"AUTO-LOT: capital unavailable, falling back to 1 lot")
+                    else:
+                        # Manual mode: existing behavior
+                        entry_qty = LOT_SIZE * MAX_LOTS
 
                     log.info(f"Breakout Signal detected! Placing BUY order for {opt_symbol} (qty={entry_qty})...")
                     order_resp = client.placeorder(
