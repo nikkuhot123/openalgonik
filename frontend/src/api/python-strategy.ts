@@ -224,17 +224,18 @@ export const pythonStrategyApi = {
   },
 
   /**
-   * Save max lots per underlying for a strategy
+   * Save strategy settings (max lots, underlying symbol)
    */
-  saveMaxLots: async (
+  saveStrategySettings: async (
     strategyId: string,
-    maxLots: { max_lots_nifty?: number; max_lots_sensex?: number }
-  ): Promise<{ status: string; max_lots_nifty: number; max_lots_sensex: number }> => {
+    settings: { max_lots_nifty?: number; max_lots_sensex?: number; underlying?: string }
+  ): Promise<{ status: string; max_lots_nifty: number; max_lots_sensex: number; underlying: string }> => {
     const response = await webClient.post<{
       status: string
       max_lots_nifty: number
       max_lots_sensex: number
-    }>(`/python/api/strategy/${strategyId}/max-lots`, maxLots)
+      underlying: string
+    }>(`/python/api/strategy/${strategyId}/max-lots`, settings)
     return response.data
   },
 }

@@ -55,57 +55,54 @@ export default function PythonStrategyIndex() {
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false)
   const [strategyToDelete, setStrategyToDelete] = useState<PythonStrategy | null>(null)
   const [currentTime, setCurrentTime] = useState(new Date())
-  const [maxLotsEdits, setMaxLotsEdits] = useState<Record<string, { nifty: string; sensex: string }>>({})
+  const [settingsEdits, setSettingsEdits] = useState<Record<string, { nifty: string; sensex: string; underlying: string }>>({})
 
-  const getMaxLots = (strategy: PythonStrategy) => {
-    const edit = maxLotsEdits[strategy.id]
+  const getSettings = (strategy: PythonStrategy) => {
+    const edit = settingsEdits[strategy.id]
     return {
       nifty: edit?.nifty ?? String(strategy.max_lots_nifty ?? 1),
       sensex: edit?.sensex ?? String(strategy.max_lots_sensex ?? 1),
+      underlying: edit?.underlying ?? (strategy.underlying ?? 'NIFTY'),
     }
   }
 
-  const handleMaxLotsChange = (strategyId: string, field: 'nifty' | 'sensex', value: string) => {
-    setMaxLotsEdits(prev => ({
-      ...prev,
-      [strategyId]: {
-        ...prev[strategyId] ?? {},
-        nifty: field === 'nifty' ? value : (prev[strategyId]?.nifty ?? ''),
-        sensex: field === 'sensex' ? value : (prev[strategyId]?.sensex ?? ''),
-      },
-    }))
+  const handleSettingsChange = (strategyId: string, field: string, value: string) => {
+    setSettingsEdits(prev => {
+      const current = prev[strategyId] ?? {}
+      return { ...prev, [strategyId]: { ...current, [field]: value } as any }
+    })
   }
 
-  const handleMaxLotsSave = async (strategy: PythonStrategy) => {
-    const lots = getMaxLots(strategy)
-    const niftyVal = parseInt(lots.nifty, 10)
-    const sensexVal = parseInt(lots.sensex, 10)
+  const handleSettingsSave = async (strategy: PythonStrategy, fields?: { underlying?: string }) => {
+    const s = getSettings(strategy)
+    const niftyVal = parseInt(s.nifty, 10)
+    const sensexVal = parseInt(s.sensex, 10)
     if (isNaN(niftyVal) || niftyVal < 1 || isNaN(sensexVal) || sensexVal < 1) {
       showToast.error('Max lots must be at least 1')
       return
     }
     try {
-      await pythonStrategyApi.saveMaxLots(strategy.id, {
+      const payload: any = {
         max_lots_nifty: niftyVal,
         max_lots_sensex: sensexVal,
-      })
-      showToast.success('Max lots saved')
-      // Update local state
+        underlying: fields?.underlying ?? s.underlying,
+      }
+      await pythonStrategyApi.saveStrategySettings(strategy.id, payload)
+      showToast.success('Settings saved')
       setStrategies(prev =>
-        prev.map(s =>
-          s.id === strategy.id
-            ? { ...s, max_lots_nifty: niftyVal, max_lots_sensex: sensexVal }
-            : s
+        prev.map(st =>
+          st.id === strategy.id
+            ? { ...st, max_lots_nifty: niftyVal, max_lots_sensex: sensexVal, underlying: payload.underlying }
+            : st
         )
       )
-      // Clear edits
-      setMaxLotsEdits(prev => {
+      setSettingsEdits(prev => {
         const next = { ...prev }
         delete next[strategy.id]
         return next
       })
     } catch {
-      showToast.error('Failed to save max lots')
+      showToast.error('Failed to save settings')
     }
   }
 
@@ -503,33 +500,55 @@ export default function PythonStrategyIndex() {
                   </p>
                 </div>
 
-                {/* Max Lots per Symbol */}
+                {/* Symbol & Max Lots */}
                 <div className="text-sm p-2 rounded bg-amber-500/10 border border-amber-500/20">
-                  <p className="text-xs font-medium text-amber-700 dark:text-amber-400 mb-2">Max Lots per Symbol</p>
+                  <div className="flex items-center justify-between mb-2">
+                    <p className="text-xs font-medium text-amber-700 dark:text-amber-400">Trading Settings</p>
+                    <div className="flex rounded-md overflow-hidden border border-amber-500/30">
+                      {(['NIFTY', 'SENSEX'] as const).map((sym) => (
+                        <button
+                          key={sym}
+                          type="button"
+                          className={`px-2.5 py-0.5 text-[10px] font-semibold transition-colors ${
+                            getSettings(strategy).underlying === sym
+                              ? 'bg-amber-500 text-white'
+                              : 'bg-transparent text-amber-700 dark:text-amber-400 hover:bg-amber-500/20'
+                          }`}
+                          disabled={strategy.status === 'running'}
+                          onClick={() => {
+                            handleSettingsChange(strategy.id, 'underlying', sym)
+                            handleSettingsSave(strategy, { underlying: sym })
+                          }}
+                        >
+                          {sym}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
                   <div className="grid grid-cols-2 gap-2">
                     <div>
-                      <Label className="text-[10px] text-muted-foreground">NIFTY</Label>
+                      <Label className="text-[10px] text-muted-foreground">NIFTY Max Lots</Label>
                       <Input
                         type="number"
                         min={1}
                         max={100}
                         className="h-7 text-xs font-mono"
-                        value={getMaxLots(strategy).nifty}
-                        onChange={(e) => handleMaxLotsChange(strategy.id, 'nifty', e.target.value)}
-                        onBlur={() => handleMaxLotsSave(strategy)}
+                        value={getSettings(strategy).nifty}
+                        onChange={(e) => handleSettingsChange(strategy.id, 'nifty', e.target.value)}
+                        onBlur={() => handleSettingsSave(strategy)}
                         disabled={strategy.status === 'running'}
                       />
                     </div>
                     <div>
-                      <Label className="text-[10px] text-muted-foreground">SENSEX</Label>
+                      <Label className="text-[10px] text-muted-foreground">SENSEX Max Lots</Label>
                       <Input
                         type="number"
                         min={1}
                         max={100}
                         className="h-7 text-xs font-mono"
-                        value={getMaxLots(strategy).sensex}
-                        onChange={(e) => handleMaxLotsChange(strategy.id, 'sensex', e.target.value)}
-                        onBlur={() => handleMaxLotsSave(strategy)}
+                        value={getSettings(strategy).sensex}
+                        onChange={(e) => handleSettingsChange(strategy.id, 'sensex', e.target.value)}
+                        onBlur={() => handleSettingsSave(strategy)}
                         disabled={strategy.status === 'running'}
                       />
                     </div>

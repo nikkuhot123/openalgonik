@@ -20,6 +20,7 @@ export interface PythonStrategy {
   updated_at: string
   max_lots_nifty: number
   max_lots_sensex: number
+  underlying: 'NIFTY' | 'SENSEX'
 }
 
 export interface PythonStrategyContent {

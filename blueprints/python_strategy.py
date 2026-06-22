@@ -530,6 +530,8 @@ def start_strategy_process(strategy_id):
                 strategy_env["MAX_LOTS"] = max_sensex
             else:
                 strategy_env["MAX_LOTS"] = max_nifty
+            # Inject underlying
+            strategy_env["UNDERLYING"] = config.get("underlying", "NIFTY")
             subprocess_args["env"] = strategy_env
 
             # Start the process
@@ -2236,6 +2238,7 @@ def api_get_strategies():
                 "created_at": config.get("created_at"),
                 "max_lots_nifty": config.get("max_lots_nifty", 1),
                 "max_lots_sensex": config.get("max_lots_sensex", 1),
+                "underlying": config.get("underlying", "NIFTY"),
             }
         )
 
@@ -2333,6 +2336,7 @@ def api_get_strategy(strategy_id):
                 "created_at": config.get("created_at"),
                 "max_lots_nifty": config.get("max_lots_nifty", 1),
                 "max_lots_sensex": config.get("max_lots_sensex", 1),
+                "underlying": config.get("underlying", "NIFTY"),
             }
         }
     )
@@ -2778,11 +2782,20 @@ def api_save_max_lots(strategy_id):
         except (ValueError, TypeError):
             return jsonify({"status": "error", "message": "Invalid max_lots_sensex value"}), 400
 
+    # Save underlying selection
+    underlying = data.get("underlying")
+    if underlying is not None:
+        if underlying in ("NIFTY", "SENSEX"):
+            STRATEGY_CONFIGS[strategy_id]["underlying"] = underlying
+        else:
+            return jsonify({"status": "error", "message": "Invalid underlying. Must be NIFTY or SENSEX."}), 400
+
     save_configs()
     return jsonify({
         "status": "success",
         "max_lots_nifty": STRATEGY_CONFIGS[strategy_id].get("max_lots_nifty", 1),
         "max_lots_sensex": STRATEGY_CONFIGS[strategy_id].get("max_lots_sensex", 1),
+        "underlying": STRATEGY_CONFIGS[strategy_id].get("underlying", "NIFTY"),
     })
 
 @python_strategy_bp.route("/edit/<strategy_id>")
