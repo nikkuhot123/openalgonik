@@ -504,61 +504,26 @@ export default function PythonStrategyIndex() {
                 <div className="text-sm p-2 rounded bg-amber-500/10 border border-amber-500/20">
                   <div className="flex items-center justify-between mb-2">
                     <p className="text-xs font-medium text-amber-700 dark:text-amber-400">Trading Settings</p>
-                    <div className="flex rounded-md overflow-hidden border border-amber-500/30">
-                      {(['NIFTY', 'SENSEX'] as const).map((sym) => (
-                        <button
-                          key={sym}
-                          type="button"
-                          className={`px-2.5 py-0.5 text-[10px] font-semibold transition-colors ${
-                            getSettings(strategy).underlying === sym
-                              ? 'bg-amber-500 text-white'
-                              : 'bg-transparent text-amber-700 dark:text-amber-400 hover:bg-amber-500/20'
-                          }`}
-                          disabled={strategy.status === 'running'}
-                          onClick={async () => {
-                            try {
-                              await pythonStrategyApi.saveStrategySettings(strategy.id, { underlying: sym })
-                              showToast.success(`Switched to ${sym}`)
-                              setStrategies(prev =>
-                                prev.map(st => st.id === strategy.id ? { ...st, underlying: sym } : st)
-                              )
-                            } catch {
-                              showToast.error('Failed to switch underlying')
-                            }
-                          }}
-                        >
-                          {sym}
-                        </button>
-                      ))}
-                    </div>
+                    <span className={`px-2 py-0.5 text-[10px] font-bold rounded ${
+                      strategy.underlying === 'SENSEX'
+                        ? 'bg-purple-500/20 text-purple-700 dark:text-purple-400'
+                        : 'bg-blue-500/20 text-blue-700 dark:text-blue-400'
+                    }`}>
+                      {strategy.underlying ?? 'NIFTY'}
+                    </span>
                   </div>
-                  <div className="grid grid-cols-2 gap-2">
-                    <div>
-                      <Label className="text-[10px] text-muted-foreground">NIFTY Max Lots</Label>
-                      <Input
-                        type="number"
-                        min={1}
-                        max={100}
-                        className="h-7 text-xs font-mono"
-                        value={getSettings(strategy).nifty}
-                        onChange={(e) => handleSettingsChange(strategy.id, 'nifty', e.target.value)}
-                        onBlur={() => handleSettingsSave(strategy)}
-                        disabled={strategy.status === 'running'}
-                      />
-                    </div>
-                    <div>
-                      <Label className="text-[10px] text-muted-foreground">SENSEX Max Lots</Label>
-                      <Input
-                        type="number"
-                        min={1}
-                        max={100}
-                        className="h-7 text-xs font-mono"
-                        value={getSettings(strategy).sensex}
-                        onChange={(e) => handleSettingsChange(strategy.id, 'sensex', e.target.value)}
-                        onBlur={() => handleSettingsSave(strategy)}
-                        disabled={strategy.status === 'running'}
-                      />
-                    </div>
+                  <div>
+                    <Label className="text-[10px] text-muted-foreground">Max Lots</Label>
+                    <Input
+                      type="number"
+                      min={1}
+                      max={100}
+                      className="h-7 text-xs font-mono"
+                      value={getSettings(strategy).nifty}
+                      onChange={(e) => handleSettingsChange(strategy.id, 'nifty', e.target.value)}
+                      onBlur={() => handleSettingsSave(strategy)}
+                      disabled={strategy.status === 'running'}
+                    />
                   </div>
                 </div>
 
