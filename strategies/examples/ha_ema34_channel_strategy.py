@@ -183,15 +183,28 @@ def run_strategy():
 
             # 1. Fetch daily HA bias (only if in IDLE state)
             if state == "IDLE":
-                daily_start = (today - timedelta(days=30)).strftime("%Y-%m-%d")
+                # Shoonya TPSeries hangs on interval="D" for index tokens.
+                # Fetch 5m candles and aggregate to daily OHLC instead.
+                daily_start = (today - timedelta(days=10)).strftime("%Y-%m-%d")
                 yesterday = (today - timedelta(days=1)).strftime("%Y-%m-%d")
-                df_daily = client.history(
+                df_intra = client.history(
                     symbol=UNDERLYING,
                     exchange=idx_exchange,
-                    interval="D",
+                    interval="5m",
                     start_date=daily_start,
                     end_date=yesterday
                 )
+                df_daily = None
+                if isinstance(df_intra, pd.DataFrame) and not df_intra.empty:
+                    df_intra = df_intra.sort_index()
+                    # Group by date and aggregate to daily OHLC
+                    df_intra["date"] = df_intra.index.date if hasattr(df_intra.index, 'date') else pd.to_datetime(df_intra.index).date
+                    df_daily = df_intra.groupby("date").agg(
+                        open=("open", "first"),
+                        high=("high", "max"),
+                        low=("low", "min"),
+                        close=("close", "last")
+                    ).reset_index(drop=True)
                 bias = compute_daily_ha_bias(df_daily)
                 if not bias:
                     log.warning("Could not compute HA bias. Retrying in 60s...")
