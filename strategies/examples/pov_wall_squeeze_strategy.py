@@ -10,6 +10,7 @@ import signal
 import time
 import logging
 from datetime import datetime, date
+from pathlib import Path
 import pandas as pd
 from openalgo import api
 
@@ -57,9 +58,60 @@ def _option_exchange(underlying: str) -> str:
     return "BFO" if underlying.upper() in _BSE_UNDERLYINGS else "NFO"
 
 # POV constants
-COOLDOWN_MINUTES = 15  # Signal dedup cooldown (existing)
-EXIT_COOLDOWN_MINUTES = int(os.getenv('COOLDOWN_MINUTES', '5'))
-MAX_TRADES_PER_DAY = int(os.getenv('MAX_TRADES_PER_DAY', '5'))
+COOLDOWN_MINUTES = 15  # POV signal dedup cooldown (per-symbol action change)
+LOSS_STREAK_LIMIT = int(os.getenv('LOSS_STREAK_LIMIT', '3'))
+DAILY_LOSS_LIMIT_RS = float(os.getenv('DAILY_LOSS_LIMIT_RS', '10000'))
+
+# Symbol lock dir (shared across all strategies on this host)
+LOCKS_DIR = Path("log") / "strategies" / "locks"
+LOCKS_DIR.mkdir(parents=True, exist_ok=True)
+
+def acquire_symbol_lock(symbol, strategy_name):
+    """Try to claim a lock on a symbol. Returns True if acquired (or already ours)."""
+    lock_file = LOCKS_DIR / f"{symbol}.lock"
+    if lock_file.exists():
+        try:
+            owner = lock_file.read_text().split("|", 1)[0]
+            return owner == strategy_name
+        except Exception:
+            return False
+    try:
+        lock_file.write_text(f"{strategy_name}|{datetime.now().isoformat()}")
+        return True
+    except Exception:
+        return False
+
+def release_symbol_lock(symbol, strategy_name):
+    """Release the lock if we own it."""
+    lock_file = LOCKS_DIR / f"{symbol}.lock"
+    try:
+        if lock_file.exists():
+            owner = lock_file.read_text().split("|", 1)[0]
+            if owner == strategy_name:
+                lock_file.unlink()
+    except Exception:
+        pass
+
+def reconcile_orphan_positions(underlying):
+    """Check positionbook for open positions matching this underlying. Returns list of dicts."""
+    found = []
+    try:
+        pb = client.positionbook()
+        if not isinstance(pb, dict) or pb.get("status") != "success":
+            return found
+        for pos in pb.get("data", []):
+            qty = int(pos.get("quantity", 0) or 0)
+            sym = pos.get("symbol", "") or ""
+            if qty != 0 and underlying.upper() in sym.upper():
+                found.append({
+                    "symbol": sym,
+                    "qty": abs(qty),
+                    "entry_price": float(pos.get("average_price", 0) or 0),
+                })
+    except Exception as e:
+        log.debug(f"Reconcile failed: {e}")
+    return found
+
 PRE_OI_MIN = 50000
 PRE_LOOKBACK = 4
 OI_ABS_THRESHOLD = 30000
@@ -245,6 +297,7 @@ def _graceful_shutdown(signum, frame):
                     quantity=pos.get("qty", QUANTITY)
                 )
                 log.info(f"Shutdown exit response for {symbol}: {resp}")
+                release_symbol_lock(symbol, STRATEGY_NAME)
             except Exception as e:
                 log.error(f"Failed to close {symbol} on shutdown: {e}")
     else:
@@ -280,20 +333,45 @@ def run_strategy():
         LOT_SIZE = QUANTITY
         log.info(f"Using configured lot size: {QUANTITY}")
 
-    positions = {}
+    positions = {}  # symbol -> {qty, sl_orderid, target_price, entry_opt_price, entry_candle_fp}
     _positions = positions
-    last_exit_time = None
-    trades_today = 0
+    consecutive_losses = 0
+    daily_loss_rs = 0.0
+    halted = False
     trade_date_pov = None
+
+    # Adopt orphan positions on boot
+    orphans = reconcile_orphan_positions(UNDERLYING)
+    for orphan in orphans:
+        log.warning(f"Adopting orphan position: {orphan['symbol']} qty={orphan['qty']} @ {orphan['entry_price']}")
+        positions[orphan["symbol"]] = {
+            "qty": orphan["qty"],
+            "sl_orderid": None,
+            "target_price": None,
+            "entry_opt_price": orphan["entry_price"],
+            "entry_candle_fp": None,
+            "adopted": True,
+        }
+        acquire_symbol_lock(orphan["symbol"], STRATEGY_NAME)
 
     while True:
         try:
             today_pov = date.today()
             if trade_date_pov != today_pov:
                 trade_date_pov = today_pov
-                last_exit_time = None
-                trades_today = 0
+                consecutive_losses = 0
+                daily_loss_rs = 0.0
+                halted = False
                 log.info(f"--- New trading day initialized: {trade_date_pov} ---")
+
+            # Circuit breaker — once halted, only manage existing positions, no new entries
+            if not halted:
+                if consecutive_losses >= LOSS_STREAK_LIMIT:
+                    log.warning(f"CIRCUIT BREAKER: {consecutive_losses} consecutive losses. New entries halted.")
+                    halted = True
+                elif daily_loss_rs >= DAILY_LOSS_LIMIT_RS:
+                    log.warning(f"CIRCUIT BREAKER: ₹{daily_loss_rs:.0f} daily losses exceed ₹{DAILY_LOSS_LIMIT_RS:.0f}. New entries halted.")
+                    halted = True
 
             # 1. Resolve nearest options expiry dynamically
             expiry = get_nearest_expiry(UNDERLYING, opt_exchange)
@@ -370,10 +448,20 @@ def run_strategy():
 
                     if sl_filled:
                         log.info(f"SL filled for {symbol}. Position closed by system.")
+                        # Compute P&L using SL trigger as exit price proxy
+                        entry_opt_price = pos.get("entry_opt_price")
+                        if entry_opt_price is not None and len(df_opt) >= 2:
+                            exit_price = float(df_opt.iloc[-2]["close"])
+                            trade_pnl = (exit_price - entry_opt_price) * pos.get("qty", QUANTITY)
+                            if trade_pnl < 0:
+                                consecutive_losses += 1
+                                daily_loss_rs += abs(trade_pnl)
+                                log.info(f"Trade P&L: ₹{trade_pnl:+.2f} | Loss streak: {consecutive_losses} | Daily losses: ₹{daily_loss_rs:.0f}")
+                            else:
+                                consecutive_losses = 0
+                                log.info(f"Trade P&L: ₹{trade_pnl:+.2f} | Loss streak reset")
+                        release_symbol_lock(symbol, STRATEGY_NAME)
                         del positions[symbol]
-                        last_exit_time = datetime.now()
-                        trades_today += 1
-                        log.info(f"Exit cooldown {EXIT_COOLDOWN_MINUTES}min (trade {trades_today}/{MAX_TRADES_PER_DAY})")
                         continue
 
                     # Check if option LTP has reached target — use smart order to close
@@ -388,7 +476,7 @@ def run_strategy():
                                     log.info(f"Cancelled SL order {sl_oid}")
                                 except Exception:
                                     pass
-                            # Close position with explicit quantity (not smart order)
+                            # Close position with explicit quantity
                             exit_resp = client.placeorder(
                                 strategy=STRATEGY_NAME,
                                 symbol=symbol,
@@ -398,30 +486,47 @@ def run_strategy():
                                 product=PRODUCT,
                                 quantity=pos.get("qty", QUANTITY)
                             )
+                            # Compute P&L
+                            entry_opt_price = pos.get("entry_opt_price")
+                            if entry_opt_price is not None:
+                                trade_pnl = (float(opt_ltp) - entry_opt_price) * pos.get("qty", QUANTITY)
+                                if trade_pnl < 0:
+                                    consecutive_losses += 1
+                                    daily_loss_rs += abs(trade_pnl)
+                                    log.info(f"Trade P&L: ₹{trade_pnl:+.2f} | Loss streak: {consecutive_losses} | Daily losses: ₹{daily_loss_rs:.0f}")
+                                else:
+                                    consecutive_losses = 0
+                                    log.info(f"Trade P&L: ₹{trade_pnl:+.2f} | Loss streak reset")
+                            release_symbol_lock(symbol, STRATEGY_NAME)
                             del positions[symbol]
-                            last_exit_time = datetime.now()
-                            trades_today += 1
-                            log.info(f"Target exit. Cooldown {EXIT_COOLDOWN_MINUTES}min (trade {trades_today}/{MAX_TRADES_PER_DAY})")
 
                     continue  # skip entry check while in a position
 
                 # 5. Trigger trades on STRONG / WATCH transitions
-                # Exit cooldown
-                if last_exit_time:
-                    elapsed = (datetime.now() - last_exit_time).total_seconds() / 60
-                    if elapsed < EXIT_COOLDOWN_MINUTES:
-                        continue
-
-                # Daily trade limit
-                if trades_today >= MAX_TRADES_PER_DAY:
+                # Halt entries if circuit breaker is tripped
+                if halted:
                     continue
 
                 if res["action"] in {"STRONG", "WATCH"} and res["is_new"]:
                     if not positions.get(symbol):
+                        # Symbol lock: skip if another strategy holds this symbol
+                        if not acquire_symbol_lock(symbol, STRATEGY_NAME):
+                            log.info(f"Symbol {symbol} locked by another strategy. Skipping this signal.")
+                            continue
+
                         # Check lot limit before entry
                         entry_qty = QUANTITY
                         if MAX_LOTS > 1:
                             entry_qty = min(QUANTITY, LOT_SIZE * MAX_LOTS)
+
+                        # Capture entry option price for P&L tracking
+                        entry_opt_price = None
+                        try:
+                            opt_q = client.quotes(symbol=symbol, exchange=opt_exchange)
+                            if opt_q.get("status") == "success":
+                                entry_opt_price = float(opt_q["data"]["ltp"])
+                        except Exception:
+                            pass
 
                         log.info(f"!!! SHORT SQUEEZE DETECTED on {symbol} !!! Placing BUY order (qty={entry_qty})...")
                         order_resp = client.placeorder(
@@ -437,8 +542,7 @@ def run_strategy():
                         if order_resp.get("status") == "success":
                             sl_orderid = None
 
-                            # Place only SL-M exit order (system fills automatically)
-                            # Target is monitored script-side to avoid double-fill race
+                            # Place SL-M exit order (system fills automatically)
                             if res["sl"] is not None:
                                 sl_resp = client.placeorder(
                                     strategy=STRATEGY_NAME,
@@ -458,8 +562,12 @@ def run_strategy():
                                 "qty": entry_qty,
                                 "sl_orderid": sl_orderid,
                                 "target_price": res["t1"],
+                                "entry_opt_price": entry_opt_price,
                             }
-                            log.info(f"Trade entered: {symbol} | SL: {res['sl']} | T1: {res['t1']} | T2: {res['t2']} | T3: {res['t3']}")
+                            log.info(f"Trade entered: {symbol} | SL: {res['sl']} | T1: {res['t1']} | T2: {res['t2']} | T3: {res['t3']} | Opt entry: {entry_opt_price}")
+                        else:
+                            # Entry failed — release lock so other strategies can try
+                            release_symbol_lock(symbol, STRATEGY_NAME)
 
         except Exception as e:
             log.error(f"Error in strategy execution loop: {e}")
