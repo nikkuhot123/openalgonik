@@ -515,9 +515,16 @@ export default function PythonStrategyIndex() {
                               : 'bg-transparent text-amber-700 dark:text-amber-400 hover:bg-amber-500/20'
                           }`}
                           disabled={strategy.status === 'running'}
-                          onClick={() => {
-                            handleSettingsChange(strategy.id, 'underlying', sym)
-                            handleSettingsSave(strategy, { underlying: sym })
+                          onClick={async () => {
+                            try {
+                              await pythonStrategyApi.saveStrategySettings(strategy.id, { underlying: sym })
+                              showToast.success(`Switched to ${sym}`)
+                              setStrategies(prev =>
+                                prev.map(st => st.id === strategy.id ? { ...st, underlying: sym } : st)
+                              )
+                            } catch {
+                              showToast.error('Failed to switch underlying')
+                            }
                           }}
                         >
                           {sym}
