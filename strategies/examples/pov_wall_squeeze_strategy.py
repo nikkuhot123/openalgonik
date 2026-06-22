@@ -57,7 +57,9 @@ def _option_exchange(underlying: str) -> str:
     return "BFO" if underlying.upper() in _BSE_UNDERLYINGS else "NFO"
 
 # POV constants
-COOLDOWN_MINUTES = 15
+COOLDOWN_MINUTES = 15  # Signal dedup cooldown (existing)
+EXIT_COOLDOWN_MINUTES = int(os.getenv('COOLDOWN_MINUTES', '5'))
+MAX_TRADES_PER_DAY = int(os.getenv('MAX_TRADES_PER_DAY', '5'))
 PRE_OI_MIN = 50000
 PRE_LOOKBACK = 4
 OI_ABS_THRESHOLD = 30000
@@ -278,11 +280,21 @@ def run_strategy():
         LOT_SIZE = QUANTITY
         log.info(f"Using configured lot size: {QUANTITY}")
 
-    positions = {}  # symbol -> {qty, sl_orderid, target_price}
+    positions = {}
     _positions = positions
+    last_exit_time = None
+    trades_today = 0
+    trade_date_pov = None
 
     while True:
         try:
+            today_pov = date.today()
+            if trade_date_pov != today_pov:
+                trade_date_pov = today_pov
+                last_exit_time = None
+                trades_today = 0
+                log.info(f"--- New trading day initialized: {trade_date_pov} ---")
+
             # 1. Resolve nearest options expiry dynamically
             expiry = get_nearest_expiry(UNDERLYING, opt_exchange)
             if not expiry:
@@ -359,6 +371,9 @@ def run_strategy():
                     if sl_filled:
                         log.info(f"SL filled for {symbol}. Position closed by system.")
                         del positions[symbol]
+                        last_exit_time = datetime.now()
+                        trades_today += 1
+                        log.info(f"Exit cooldown {EXIT_COOLDOWN_MINUTES}min (trade {trades_today}/{MAX_TRADES_PER_DAY})")
                         continue
 
                     # Check if option LTP has reached target — use smart order to close
@@ -384,11 +399,23 @@ def run_strategy():
                                 quantity=pos.get("qty", QUANTITY)
                             )
                             del positions[symbol]
-                            continue
+                            last_exit_time = datetime.now()
+                            trades_today += 1
+                            log.info(f"Target exit. Cooldown {EXIT_COOLDOWN_MINUTES}min (trade {trades_today}/{MAX_TRADES_PER_DAY})")
 
                     continue  # skip entry check while in a position
 
                 # 5. Trigger trades on STRONG / WATCH transitions
+                # Exit cooldown
+                if last_exit_time:
+                    elapsed = (datetime.now() - last_exit_time).total_seconds() / 60
+                    if elapsed < EXIT_COOLDOWN_MINUTES:
+                        continue
+
+                # Daily trade limit
+                if trades_today >= MAX_TRADES_PER_DAY:
+                    continue
+
                 if res["action"] in {"STRONG", "WATCH"} and res["is_new"]:
                     if not positions.get(symbol):
                         # Check lot limit before entry

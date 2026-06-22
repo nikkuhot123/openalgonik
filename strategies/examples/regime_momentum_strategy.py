@@ -61,6 +61,8 @@ def _option_exchange(underlying: str) -> str:
 # Time windows
 ENTRY_START = dtime(9, 45)
 ENTRY_END   = dtime(14, 30)
+COOLDOWN_MINUTES = int(os.getenv('COOLDOWN_MINUTES', '5'))
+MAX_TRADES_PER_DAY = int(os.getenv('MAX_TRADES_PER_DAY', '3'))
 EXIT_TIME   = dtime(15, 15)
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -596,7 +598,9 @@ def run_strategy():
     trade_date = None
     day_character = None
     range_by_1030 = 0.0
-    pcr_history = []  # rolling PCR readings for the day
+    pcr_history = []
+    last_exit_time = None
+    trades_today = 0
 
     while True:
         try:
@@ -609,6 +613,8 @@ def run_strategy():
                 day_character = None
                 range_by_1030 = 0.0
                 pcr_history = []
+                last_exit_time = None
+                trades_today = 0
                 log.info(f"--- New trading day initialized: {trade_date} ---")
 
             now = datetime.now()
@@ -668,7 +674,9 @@ def run_strategy():
                         state = "DONE"
                     else:
                         state = "IDLE"
-                        log.info("Returning to IDLE — watching for new regime signals.")
+                        last_exit_time = datetime.now()
+                        trades_today += 1
+                        log.info(f"Returning to IDLE — cooldown {COOLDOWN_MINUTES}min (trade {trades_today}/{MAX_TRADES_PER_DAY})")
                     active_trade = {}
                     _active_trade = {}
                 else:
@@ -685,6 +693,20 @@ def run_strategy():
 
                 if current_time > ENTRY_END:
                     log.info("Past entry window (14:30). Done for today.")
+                    state = "DONE"
+                    continue
+
+                # Cooldown check after exit
+                if last_exit_time:
+                    elapsed = (datetime.now() - last_exit_time).total_seconds() / 60
+                    if elapsed < COOLDOWN_MINUTES:
+                        log.info(f"Cooldown: {COOLDOWN_MINUTES - elapsed:.0f}min remaining")
+                        time.sleep(15)
+                        continue
+
+                # Daily trade limit
+                if trades_today >= MAX_TRADES_PER_DAY:
+                    log.info(f"Daily limit reached ({trades_today}/{MAX_TRADES_PER_DAY}). Done for today.")
                     state = "DONE"
                     continue
 
