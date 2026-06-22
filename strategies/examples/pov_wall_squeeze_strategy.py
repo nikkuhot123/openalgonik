@@ -32,8 +32,8 @@ client = api(api_key=api_key, host=host, ws_url=ws_url)
 STRATEGY_NAME = "POV Wall-Squeeze"
 UNDERLYING = os.getenv('UNDERLYING', 'NIFTY')
 PRODUCT = "MIS"
-QUANTITY = int(os.getenv('QUANTITY', '75'))  # 1 lot default for NIFTY
-MAX_LOTS = int(os.getenv('MAX_LOTS', '1'))  # Max lots per symbol per strategy
+QUANTITY = int(os.getenv('QUANTITY', '0'))  # 0 = auto-detect from exchange
+MAX_LOTS = int(os.getenv('MAX_LOTS', '1'))
 LOT_SIZE = QUANTITY
 
 # Strike configuration
@@ -95,6 +95,28 @@ def get_option_symbol(underlying, exchange, expiry, offset, option_type):
             return resp.get("symbol")
     except Exception as e:
         log.error(f"Error fetching optionsymbol: {e}")
+    return None
+
+def fetch_lot_size(underlying, idx_exchange, opt_exchange):
+    """Fetch actual lot size from option chain. Returns lot size or None."""
+    try:
+        expiry = get_nearest_expiry(underlying, opt_exchange)
+        if not expiry:
+            return None
+        resp = client.optionchain(
+            underlying=underlying, exchange=idx_exchange,
+            expiry_date=expiry, strike_count=1
+        )
+        if resp.get("status") == "success":
+            for item in resp.get("chain", []):
+                ce = item.get("ce") or {}
+                if ce.get("lotsize"):
+                    return int(ce["lotsize"])
+                pe = item.get("pe") or {}
+                if pe.get("lotsize"):
+                    return int(pe["lotsize"])
+    except Exception as e:
+        log.error(f"Error fetching lot size: {e}")
     return None
 
 
@@ -233,13 +255,29 @@ signal.signal(signal.SIGINT, _graceful_shutdown)
 signal.signal(signal.SIGTERM, _graceful_shutdown)
 
 def run_strategy():
-    global _positions, _opt_exchange
+    global _positions, _opt_exchange, QUANTITY, LOT_SIZE
     log.info(f"Starting POV Wall-Squeeze Strategy for underlying: {UNDERLYING}...")
     strike_gap = STRIKE_GAPS.get(UNDERLYING.upper(), 50)
     is_midcp = UNDERLYING.upper() == "MIDCPNIFTY"
     idx_exchange = _index_exchange(UNDERLYING)
     opt_exchange = _option_exchange(UNDERLYING)
     _opt_exchange = opt_exchange
+
+    # Auto-detect lot size if QUANTITY not explicitly set
+    if QUANTITY == 0:
+        detected = fetch_lot_size(UNDERLYING, idx_exchange, opt_exchange)
+        if detected:
+            QUANTITY = detected
+            LOT_SIZE = detected
+            log.info(f"Auto-detected lot size: {QUANTITY}")
+        else:
+            QUANTITY = 75
+            LOT_SIZE = 75
+            log.warning(f"Could not detect lot size, using default: {QUANTITY}")
+    else:
+        LOT_SIZE = QUANTITY
+        log.info(f"Using configured lot size: {QUANTITY}")
+
     positions = {}  # symbol -> {qty, sl_orderid, target_price}
     _positions = positions
 
