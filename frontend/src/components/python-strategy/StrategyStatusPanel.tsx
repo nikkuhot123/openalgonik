@@ -217,9 +217,11 @@ export default function StrategyStatusPanel({ strategy }: StrategyStatusPanelPro
                       label="Regime"
                       value={status.indicators.regime}
                       icon={
-                        status.indicators.regime?.toUpperCase().includes('BULL') ? (
+                        status.indicators.regime?.toUpperCase().includes('UP') ||
+                        status.indicators.regime?.toUpperCase().includes('GREEN') ? (
                           <TrendingUp className="h-3.5 w-3.5 text-green-500" />
-                        ) : status.indicators.regime?.toUpperCase().includes('BEAR') ? (
+                        ) : status.indicators.regime?.toUpperCase().includes('DOWN') ||
+                          status.indicators.regime?.toUpperCase().includes('RED') ? (
                           <TrendingDown className="h-3.5 w-3.5 text-red-500" />
                         ) : null
                       }

@@ -2630,6 +2630,7 @@ def parse_strategy_log_file(filepath, is_running):
             result["active_trades"] = []
 
         # --- Indicator extraction ---
+        # Regime Momentum: "Regime: IMPULSE_UP | Phase: BASE | Velocity: FLAT — no signal"
         if "Regime:" in msg or "Phase:" in msg or "Velocity:" in msg or "ATR:" in msg:
             parts = msg.split("|")
             for part in parts:
@@ -2646,6 +2647,54 @@ def parse_strategy_log_file(filepath, is_running):
                         except (ValueError, TypeError):
                             result["indicators"][key] = val
 
+        # HA-EMA: "Previous-day HA bias: RED → trading PE only"
+        if "HA bias:" in msg:
+            bias_match = re.search(r"HA bias:\s*(\w+)", msg)
+            if bias_match:
+                bias = bias_match.group(1)
+                result["indicators"]["regime"] = f"HA {bias}"
+                result["indicators"]["phase"] = "PE only" if bias == "RED" else "CE only"
+
+        # HA-EMA: "Spot Close[-2]: 24152.80 | Upper: 24081.10 | Lower: 24058.89"
+        if "Spot Close" in msg:
+            parts = msg.split("|")
+            for part in parts:
+                part = part.strip()
+                if ":" in part:
+                    key, _, val = part.partition(":")
+                    key = key.strip().lower()
+                    val = val.strip()
+                    if "spot" in key:
+                        try:
+                            result["indicators"]["spot"] = float(val)
+                        except (ValueError, TypeError):
+                            pass
+                    elif "upper" in key:
+                        try:
+                            result["indicators"]["velocity"] = f"Upper: {float(val):.2f}"
+                        except (ValueError, TypeError):
+                            pass
+                    elif "lower" in key:
+                        try:
+                            result["indicators"]["atr"] = f"Lower: {float(val):.2f}"
+                        except (ValueError, TypeError):
+                            pass
+
+        # POV: "Symbol: NIFTY23JUN2624050PE | Action: WAIT | Score: 2/5"
+        if "Action:" in msg and "Score:" in msg:
+            parts = msg.split("|")
+            for part in parts:
+                part = part.strip()
+                if ":" in part:
+                    key, _, val = part.partition(":")
+                    key = key.strip().lower()
+                    val = val.strip()
+                    if key == "symbol":
+                        result["indicators"]["regime"] = val
+                    elif key == "action":
+                        result["indicators"]["phase"] = val
+                    elif key == "score":
+                        result["indicators"]["velocity"] = f"Score {val}"
     return result
 
 
