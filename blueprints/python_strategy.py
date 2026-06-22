@@ -2745,6 +2745,37 @@ def api_get_strategy_status(strategy_id):
         })
 
     parsed = parse_strategy_log_file(str(log_files[0]), is_running)
+
+    # Cross-reference with live positionbook for orphaned positions
+    # (positions that exist but the strategy lost track of after restart)
+    if is_running and not parsed["active_trades"]:
+        try:
+            underlying = config.get("underlying", "NIFTY")
+            from database.auth_db import get_first_available_api_key
+            live_api_key = get_first_available_api_key()
+            if live_api_key:
+                from services.positionbook_service import get_positions
+                success, pos_data, _ = get_positions(api_key=live_api_key)
+                if success:
+                    positions = pos_data.get("data", [])
+                    for pos in positions:
+                        qty = pos.get("quantity", 0)
+                        sym = pos.get("symbol", "")
+                        if qty != 0 and underlying.upper() in sym.upper():
+                            direction = "CE" if "CE" in sym.upper() else "PE" if "PE" in sym.upper() else "UNKNOWN"
+                            parsed["active_trades"].append({
+                                "symbol": sym,
+                                "direction": direction,
+                                "entry_price": float(pos.get("average_price", 0)) or None,
+                                "stop_loss": None,
+                                "target": None,
+                                "current_price": float(pos.get("ltp", 0)) or None,
+                                "type": "orphaned",
+                            })
+                            parsed["state"] = "IN_TRADE"
+        except Exception as e:
+            logger.debug(f"Error checking positionbook for {strategy_id}: {e}")
+
     return jsonify({
         "status": "success",
         "strategy_id": strategy_id,
