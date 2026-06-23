@@ -617,6 +617,41 @@ def start_strategy_process(strategy_id):
             return False, f"Failed to start strategy: {str(e)}"
 
 
+def _wait_psutil_safe(procs, timeout):
+    """Wait for psutil.Process objects to exit, eventlet/asyncio-safe.
+
+    psutil.wait_procs() and psutil.Process.wait(timeout=) internally call
+    select.poll() on POSIX. Under gunicorn's `--worker-class eventlet`,
+    eventlet monkey-patches stdlib `select` with a green version that does
+    NOT expose `poll`, so those calls raise `AttributeError: module
+    'select' has no attribute 'poll'` and the stop endpoint fails.
+
+    This helper avoids select entirely: it polls is_running() / status()
+    with a small sleep interval. Returns (gone, alive) like wait_procs.
+    Accepts a single psutil.Process or an iterable.
+    """
+    if not isinstance(procs, (list, tuple)):
+        procs = [procs]
+    deadline = time.time() + max(0.0, float(timeout))
+    interval = 0.1
+    alive = list(procs)
+    gone = []
+    while alive and time.time() < deadline:
+        still_alive = []
+        for p in alive:
+            try:
+                if not p.is_running() or p.status() == psutil.STATUS_ZOMBIE:
+                    gone.append(p)
+                else:
+                    still_alive.append(p)
+            except psutil.NoSuchProcess:
+                gone.append(p)
+        alive = still_alive
+        if alive:
+            time.sleep(interval)
+    return gone, alive
+
+
 def stop_strategy_process(strategy_id):
     """Stop a running strategy process - cross-platform implementation"""
     with PROCESS_LOCK:  # Thread-safe operation
@@ -682,13 +717,18 @@ def stop_strategy_process(strategy_id):
                         except ProcessLookupError:
                             pass  # Process already dead
             elif hasattr(process, "terminate"):
-                # For psutil.Process objects
+                # For psutil.Process objects — use eventlet-safe wait helper
+                # (psutil.Process.wait(timeout=) calls select.poll which eventlet's
+                # monkey-patched select doesn't expose).
                 try:
                     process.terminate()
-                    process.wait(timeout=5)
-                except psutil.TimeoutExpired:
-                    process.kill()
-                    process.wait(timeout=2)
+                    _, alive = _wait_psutil_safe(process, timeout=5)
+                    if alive:
+                        try:
+                            process.kill()
+                            _wait_psutil_safe(process, timeout=2)
+                        except (psutil.NoSuchProcess, psutil.AccessDenied):
+                            pass
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     pass  # Process already dead or no permission
             else:
@@ -746,7 +786,7 @@ def terminate_process_cross_platform(pid):
         process.terminate()
 
         # Wait and kill if necessary
-        gone, alive = psutil.wait_procs([process] + children, timeout=3)
+        gone, alive = _wait_psutil_safe([process] + children, timeout=3)
         for p in alive:
             try:
                 p.kill()
