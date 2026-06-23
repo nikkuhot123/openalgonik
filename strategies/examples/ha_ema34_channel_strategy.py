@@ -335,6 +335,7 @@ def run_strategy():
         _active_trade = active_trade
         state = "IN_TRADE"
         acquire_symbol_lock(orphan["symbol"], STRATEGY_NAME)
+        trade_date = date.today()  # seed so the new-day reset on first iteration does NOT wipe the adopted IN_TRADE state
 
     while True:
         try:
@@ -614,6 +615,9 @@ def run_strategy():
                     else:
                         # Entry failed — release lock so other strategies can try
                         release_symbol_lock(opt_symbol, STRATEGY_NAME)
+
+                # No signal (or entry placed/failed) → pause before re-evaluating to avoid hot-looping the broker
+                time.sleep(15)
 
             elif state == "DONE":
                 # Sleep longer when done for the day
