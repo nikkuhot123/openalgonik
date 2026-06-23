@@ -25,6 +25,7 @@ from database.sandbox_db import SandboxPositions, SandboxTrades, db_session, get
 from database.token_db import get_symbol_info
 from sandbox.fund_manager import FundManager
 from sandbox.holdings_manager import HoldingsManager
+from sandbox._quote_sanity import is_plausible_option_ltp
 from services.market_data_service import get_market_data_service
 from services.quotes_service import get_multiquotes, get_quotes
 from utils.logging import get_logger
@@ -643,7 +644,14 @@ class PositionManager:
 
                 quote = quote_cache.get((position.symbol, position.exchange))
                 if quote:
-                    ltp = Decimal(str(quote.get("ltp", 0)))
+                    ltp_raw = quote.get("ltp", 0)
+                    if not is_plausible_option_ltp(position.symbol, ltp_raw):
+                        logger.warning(
+                            f"MTM rejected: implausible LTP {ltp_raw} for {position.symbol} "
+                            f"(likely broker spot-leak); keeping last good LTP {position.ltp}"
+                        )
+                        continue
+                    ltp = Decimal(str(ltp_raw))
                     if ltp > 0:
                         position.ltp = ltp
 

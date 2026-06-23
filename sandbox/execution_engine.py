@@ -27,6 +27,7 @@ from database.auth_db import get_auth_token_broker
 from database.sandbox_db import SandboxOrders, SandboxPositions, SandboxTrades, db_session
 from database.token_db import get_symbol_info
 from sandbox.fund_manager import FundManager, reconcile_margin, validate_margin_consistency
+from sandbox._quote_sanity import is_plausible_option_ltp
 from services.quotes_service import get_multiquotes, get_quotes
 from utils.logging import get_logger
 
@@ -281,9 +282,24 @@ class ExecutionEngine:
                     )
                 return
 
-            ltp = Decimal(str(quote.get("ltp", 0)))
-            bid = Decimal(str(quote.get("bid", 0)))
-            ask = Decimal(str(quote.get("ask", 0)))
+            ltp_raw = quote.get("ltp", 0)
+            bid_raw = quote.get("bid", 0)
+            ask_raw = quote.get("ask", 0)
+
+            # Sanity gate: if the broker leaked the underlying spot as the
+            # option LTP, refuse to fill on this cycle. Leaves the order
+            # pending so the next clean quote can execute it.
+            if not is_plausible_option_ltp(order.symbol, ltp_raw):
+                logger.warning(
+                    f"FILL skipped for order {order.orderid} ({order.symbol}): "
+                    f"implausible LTP {ltp_raw} (likely broker spot-leak); will retry"
+                )
+                return
+
+            ltp = Decimal(str(ltp_raw))
+            # Reject implausible bid/ask too — fall back to LTP if either is corrupt
+            bid = Decimal(str(bid_raw)) if is_plausible_option_ltp(order.symbol, bid_raw) else Decimal("0")
+            ask = Decimal(str(ask_raw)) if is_plausible_option_ltp(order.symbol, ask_raw) else Decimal("0")
 
             if ltp <= 0:
                 logger.warning(f"Invalid LTP for order {order.orderid}: {ltp}")
