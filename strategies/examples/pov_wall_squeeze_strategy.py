@@ -128,6 +128,35 @@ def live_position_qty(underlying, symbol):
         log.debug(f"live_position_qty failed for {symbol}: {e}")
         return None
 
+def safe_cancel_order(order_id, context=""):
+    """Cancel an order, treating 'already complete/cancelled/rejected' as success.
+
+    The sandbox engine (and many live brokers) return an error when you try to
+    cancel an order that's already filled — but for our purposes that's the
+    desired end state: the order is no longer active. Map those terminal-status
+    errors to a clean no-op so callers can audit-log cleanly.
+
+    Returns: (True, msg) on cancel-or-already-terminal; (False, err_msg) otherwise.
+    """
+    try:
+        resp = client.cancelorder(order_id=order_id, strategy=STRATEGY_NAME)
+    except Exception as e:
+        return False, f"cancelorder threw: {e}"
+
+    if not isinstance(resp, dict):
+        return True, f"non-dict response (assumed ok): {resp}"
+
+    if resp.get("status") == "success":
+        return True, "cancelled"
+
+    msg = str(resp.get("message", "")).lower()
+    # Terminal states the broker reports — already what we want
+    terminal = ("complete", "cancelled", "canceled", "rejected", "trigger pending", "no such order")
+    if any(t in msg for t in terminal):
+        return True, f"already terminal: {resp.get('message', '')}"
+
+    return False, f"{resp.get('message', resp)}"
+
 def sync_positions_with_book(positions, underlying):
     """Drop tracked positions that are no longer open on the broker side.
     Cancels any associated SL order and releases the symbol lock.
@@ -142,11 +171,9 @@ def sync_positions_with_book(positions, underlying):
             pos = positions.get(symbol, {})
             sl_oid = pos.get("sl_orderid")
             if sl_oid:
-                try:
-                    resp = client.cancelorder(order_id=sl_oid, strategy=STRATEGY_NAME)
-                    log.warning(f"RECONCILE: {symbol} not in positionbook; cancelled orphan SL order {sl_oid} → {resp}")
-                except Exception as e:
-                    log.error(f"RECONCILE: failed to cancel orphan SL {sl_oid} for {symbol}: {e}")
+                ok, msg = safe_cancel_order(sl_oid, context=f"reconcile-{symbol}")
+                level = log.info if ok else log.error
+                level(f"RECONCILE: {symbol} not in positionbook; cancel SL {sl_oid} → {msg}")
             else:
                 log.warning(f"RECONCILE: {symbol} not in positionbook; dropping from tracking")
             release_symbol_lock(symbol, STRATEGY_NAME)
@@ -383,11 +410,9 @@ def _graceful_shutdown(signum, frame):
             # ALWAYS cancel the pending SL order (safe regardless of position state)
             sl_oid = pos.get("sl_orderid")
             if sl_oid:
-                try:
-                    client.cancelorder(order_id=sl_oid, strategy=STRATEGY_NAME)
-                    log.info(f"Cancelled SL order {sl_oid} for {symbol}")
-                except Exception:
-                    pass
+                ok, msg = safe_cancel_order(sl_oid, context=f"shutdown-{symbol}")
+                level = log.info if ok else log.warning
+                level(f"Shutdown: cancel SL {sl_oid} for {symbol} → {msg}")
 
             # CRITICAL: only SELL what the broker still says we own.
             # Repeated restarts of a stale _positions dict had been firing repeated
@@ -595,11 +620,9 @@ def run_strategy():
                             log.info(f"Target reached for {symbol}! LTP {opt_ltp:.2f} >= T1 {target_price:.2f}")
                             # Cancel the SL order first
                             if sl_oid:
-                                try:
-                                    client.cancelorder(order_id=sl_oid, strategy=STRATEGY_NAME)
-                                    log.info(f"Cancelled SL order {sl_oid}")
-                                except Exception:
-                                    pass
+                                ok, msg = safe_cancel_order(sl_oid, context=f"target-{symbol}")
+                                level = log.info if ok else log.warning
+                                level(f"Target-exit: cancel SL {sl_oid} → {msg}")
                             # Close position with explicit quantity
                             exit_resp = client.placeorder(
                                 strategy=STRATEGY_NAME,
