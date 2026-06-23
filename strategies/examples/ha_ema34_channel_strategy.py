@@ -62,6 +62,7 @@ EMA_PERIOD = 34
 ENTRY_START = dtime(9, 45)
 ENTRY_END = dtime(14, 30)
 EXIT_TIME = dtime(15, 15)  # Auto-squareoff time
+BREAKOUT_MULT = float(os.getenv('BREAKOUT_MULT', '1.0'))
 # Circuit breaker config (replaces COOLDOWN_MINUTES / MAX_TRADES_PER_DAY)
 LOSS_STREAK_LIMIT = int(os.getenv('LOSS_STREAK_LIMIT', '3'))
 DAILY_LOSS_LIMIT_RS = float(os.getenv('DAILY_LOSS_LIMIT_RS', '10000'))
@@ -568,13 +569,13 @@ def run_strategy():
                 sl_spot = None
                 target_spot = None
 
-                if bias == "GREEN" and candle_close > ema_upper:
+                if bias == "GREEN" and candle_close > ema_upper * BREAKOUT_MULT:
                     sl_spot = candle_low
                     risk = entry_spot - sl_spot
                     if risk > 0:
                         target_spot = entry_spot + 2.0 * risk
                         signal = "CE"
-                elif bias == "RED" and candle_close < ema_lower:
+                elif bias == "RED" and candle_close < ema_lower * (2.0 - BREAKOUT_MULT):
                     sl_spot = candle_high
                     risk = sl_spot - entry_spot
                     if risk > 0:
