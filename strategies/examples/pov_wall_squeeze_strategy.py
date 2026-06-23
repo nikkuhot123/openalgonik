@@ -114,6 +114,46 @@ def reconcile_orphan_positions(underlying):
         log.debug(f"Reconcile failed: {e}")
     return found
 
+def live_position_qty(underlying, symbol):
+    """Return current qty on `symbol` per the broker's positionbook, 0 if absent."""
+    try:
+        pb = client.positionbook()
+        if not isinstance(pb, dict) or pb.get("status") != "success":
+            return None  # cannot verify
+        for pos in pb.get("data", []):
+            if (pos.get("symbol", "") or "").upper() == symbol.upper():
+                return abs(int(pos.get("quantity", 0) or 0))
+        return 0
+    except Exception as e:
+        log.debug(f"live_position_qty failed for {symbol}: {e}")
+        return None
+
+def sync_positions_with_book(positions, underlying):
+    """Drop tracked positions that are no longer open on the broker side.
+    Cancels any associated SL order and releases the symbol lock.
+    Returns the number of stale entries pruned.
+    """
+    pruned = 0
+    for symbol in list(positions.keys()):
+        qty = live_position_qty(underlying, symbol)
+        if qty is None:
+            continue  # could not verify; leave intact
+        if qty == 0:
+            pos = positions.get(symbol, {})
+            sl_oid = pos.get("sl_orderid")
+            if sl_oid:
+                try:
+                    resp = client.cancelorder(order_id=sl_oid, strategy=STRATEGY_NAME)
+                    log.warning(f"RECONCILE: {symbol} not in positionbook; cancelled orphan SL order {sl_oid} → {resp}")
+                except Exception as e:
+                    log.error(f"RECONCILE: failed to cancel orphan SL {sl_oid} for {symbol}: {e}")
+            else:
+                log.warning(f"RECONCILE: {symbol} not in positionbook; dropping from tracking")
+            release_symbol_lock(symbol, STRATEGY_NAME)
+            del positions[symbol]
+            pruned += 1
+    return pruned
+
 def fetch_available_capital():
     """Query funds API for current available cash. Returns float or None."""
     try:
@@ -422,6 +462,16 @@ def run_strategy():
                 elif daily_loss_rs >= DAILY_LOSS_LIMIT_RS:
                     log.warning(f"CIRCUIT BREAKER: ₹{daily_loss_rs:.0f} daily losses exceed ₹{DAILY_LOSS_LIMIT_RS:.0f}. New entries halted.")
                     halted = True
+
+            # Reconcile tracked positions with broker positionbook — drops stale entries
+            # and cancels orphan SL orders if the position was closed externally
+            # (e.g. by another strategy's shutdown handler, manual close, MIS squareoff).
+            try:
+                pruned = sync_positions_with_book(positions, UNDERLYING)
+                if pruned:
+                    log.info(f"RECONCILE: pruned {pruned} stale position(s) from tracking")
+            except Exception as e:
+                log.error(f"RECONCILE pass failed: {e}")
 
             # 1. Resolve nearest options expiry dynamically
             expiry = get_nearest_expiry(UNDERLYING, opt_exchange)
