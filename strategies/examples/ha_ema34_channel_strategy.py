@@ -59,8 +59,9 @@ def _option_exchange(underlying: str) -> str:
 
 # Strategy Constants
 EMA_PERIOD = 34
-ENTRY_START = dtime(9, 45)
-ENTRY_END = dtime(14, 30)
+STRIKE_OFFSET = os.getenv('STRIKE_OFFSET', 'ATM')  # 'ATM', 'ITM1', 'ITM2', 'OTM1', 'OTM2'
+ENTRY_START = dtime(int(os.getenv('ENTRY_START_HOUR', '9')), int(os.getenv('ENTRY_START_MIN', '45')))
+ENTRY_END = dtime(int(os.getenv('ENTRY_END_HOUR', '14')), int(os.getenv('ENTRY_END_MIN', '30')))
 EXIT_TIME = dtime(15, 15)  # Auto-squareoff time
 BREAKOUT_MULT = float(os.getenv('BREAKOUT_MULT', '1.0'))
 # Circuit breaker config (replaces COOLDOWN_MINUTES / MAX_TRADES_PER_DAY)
@@ -587,8 +588,7 @@ def run_strategy():
                     if not expiry:
                         time.sleep(15)
                         continue
-
-                    opt_symbol = get_option_symbol(UNDERLYING, idx_exchange, expiry, "ATM", signal)
+                    opt_symbol = get_option_symbol(UNDERLYING, idx_exchange, expiry, STRIKE_OFFSET, signal)
                     if not opt_symbol:
                         time.sleep(15)
                         continue
