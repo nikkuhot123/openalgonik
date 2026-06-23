@@ -265,21 +265,45 @@ def _graceful_shutdown(signum, frame):
     if _active_trade and _opt_exchange:
         symbol = _active_trade.get("symbol")
         if symbol:
-            log.info(f"Closing active position: {symbol}...")
+            # CRITICAL: verify broker still has this position OPEN with non-zero qty.
+            # Without this check, a stale active_trade dict + repeated restarts can fire
+            # repeated SELLs that push us net-short on options we don't own.
+            broker_qty = None
             try:
-                resp = client.placeorder(
-                    strategy=STRATEGY_NAME,
-                    symbol=symbol,
-                    action="SELL",
-                    exchange=_opt_exchange,
-                    price_type="MARKET",
-                    product=PRODUCT,
-                    quantity=_active_trade.get("qty", QUANTITY)
-                )
-                log.info(f"Shutdown exit response: {resp}")
-                release_symbol_lock(symbol, STRATEGY_NAME)
+                pb = client.positionbook()
+                if isinstance(pb, dict) and pb.get("status") == "success":
+                    for pos in pb.get("data", []):
+                        if (pos.get("symbol", "") or "").upper() == symbol.upper():
+                            broker_qty = int(pos.get("quantity", 0) or 0)
+                            break
+                    if broker_qty is None:
+                        broker_qty = 0  # not in book → flat
             except Exception as e:
-                log.error(f"Failed to close position on shutdown: {e}")
+                log.error(f"Shutdown: positionbook check failed for {symbol}: {e} — aborting close to avoid naked short")
+                release_symbol_lock(symbol, STRATEGY_NAME)
+                log.info("Shutdown complete. Exiting.")
+                sys.exit(0)
+
+            if broker_qty is None or broker_qty <= 0:
+                log.info(f"Shutdown: broker reports {symbol} qty={broker_qty} — already flat, no SELL")
+                release_symbol_lock(symbol, STRATEGY_NAME)
+            else:
+                close_qty = min(broker_qty, _active_trade.get("qty", QUANTITY))
+                log.info(f"Closing active position: {symbol} (broker qty={broker_qty}, closing {close_qty})")
+                try:
+                    resp = client.placeorder(
+                        strategy=STRATEGY_NAME,
+                        symbol=symbol,
+                        action="SELL",
+                        exchange=_opt_exchange,
+                        price_type="MARKET",
+                        product=PRODUCT,
+                        quantity=close_qty
+                    )
+                    log.info(f"Shutdown exit response: {resp}")
+                    release_symbol_lock(symbol, STRATEGY_NAME)
+                except Exception as e:
+                    log.error(f"Failed to close position on shutdown: {e}")
     else:
         log.info("No active position — nothing to close.")
 

@@ -365,8 +365,22 @@ def _graceful_shutdown(signum, frame):
     log.info(f"{'='*60}")
 
     if _positions and _opt_exchange:
+        # Fetch positionbook ONCE so we can verify each tracked position before closing
+        broker_qtys = {}  # symbol_upper -> qty (signed)
+        try:
+            pb = client.positionbook()
+            if isinstance(pb, dict) and pb.get("status") == "success":
+                for pos in pb.get("data", []):
+                    sym_u = (pos.get("symbol", "") or "").upper()
+                    if sym_u:
+                        broker_qtys[sym_u] = int(pos.get("quantity", 0) or 0)
+        except Exception as e:
+            log.error(f"Shutdown: positionbook fetch failed: {e} — skipping all closes to avoid naked shorts")
+            log.info("Shutdown complete. Exiting.")
+            sys.exit(0)
+
         for symbol, pos in list(_positions.items()):
-            # Cancel pending SL order
+            # ALWAYS cancel the pending SL order (safe regardless of position state)
             sl_oid = pos.get("sl_orderid")
             if sl_oid:
                 try:
@@ -374,8 +388,18 @@ def _graceful_shutdown(signum, frame):
                     log.info(f"Cancelled SL order {sl_oid} for {symbol}")
                 except Exception:
                     pass
-            # Close position to flat
-            log.info(f"Closing position: {symbol}...")
+
+            # CRITICAL: only SELL what the broker still says we own.
+            # Repeated restarts of a stale _positions dict had been firing repeated
+            # SELLs, flipping us net-SHORT on options we no longer held.
+            broker_qty = broker_qtys.get(symbol.upper(), 0)
+            if broker_qty <= 0:
+                log.info(f"Shutdown: broker reports {symbol} qty={broker_qty} — already flat, no SELL")
+                release_symbol_lock(symbol, STRATEGY_NAME)
+                continue
+
+            close_qty = min(broker_qty, pos.get("qty", QUANTITY))
+            log.info(f"Closing position: {symbol} (broker qty={broker_qty}, closing {close_qty})")
             try:
                 resp = client.placeorder(
                     strategy=STRATEGY_NAME,
@@ -384,7 +408,7 @@ def _graceful_shutdown(signum, frame):
                     exchange=_opt_exchange,
                     price_type="MARKET",
                     product=PRODUCT,
-                    quantity=pos.get("qty", QUANTITY)
+                    quantity=close_qty
                 )
                 log.info(f"Shutdown exit response for {symbol}: {resp}")
                 release_symbol_lock(symbol, STRATEGY_NAME)
