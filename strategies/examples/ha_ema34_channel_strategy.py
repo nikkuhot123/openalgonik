@@ -142,6 +142,32 @@ def compute_auto_lots(capital, risk_pct, max_loss_per_unit, lot_size, hard_cap_l
     auto_lots = int(risk_budget / max_loss_per_lot)
     return max(1, min(auto_lots, hard_cap_lots))
 
+def fetch_option_ltp(opt_symbol, opt_exchange, underlying_ltp=None, max_retries=3, retry_delay=1.0):
+    """Fetch option LTP with sanity check against underlying spot.
+
+    Brokers (notably Shoonya) can return the underlying spot value when the
+    option symbol's tick cache isn't populated yet (first quote after subscription).
+    Validates that the returned LTP isn't suspiciously close to the spot price.
+
+    Returns: float LTP on success, None on persistent failure.
+    """
+    for attempt in range(max_retries):
+        try:
+            q = client.quotes(symbol=opt_symbol, exchange=opt_exchange)
+            if q.get("status") == "success":
+                ltp = float(q["data"]["ltp"])
+                # Option premium for indices is virtually never > 20% of spot.
+                # If we got back a value close to spot, it's a stale leak — retry.
+                if underlying_ltp is None or ltp < underlying_ltp * 0.2:
+                    return ltp
+                log.warning(f"Option LTP {ltp:.2f} suspiciously close to spot {underlying_ltp:.2f} for {opt_symbol}; retry {attempt+1}/{max_retries}")
+        except Exception as e:
+            log.warning(f"Option LTP fetch failed for {opt_symbol}: {e}; retry {attempt+1}/{max_retries}")
+        if attempt < max_retries - 1:
+            time.sleep(retry_delay)
+    log.error(f"Failed to get valid option LTP for {opt_symbol} after {max_retries} attempts")
+    return None
+
 def get_nearest_expiry(underlying, exchange):
     try:
         resp = client.expiry(symbol=underlying, exchange=exchange, instrumenttype="options")
@@ -399,14 +425,8 @@ def run_strategy():
 
                 if exit_triggered:
                     log.info(f"!!! {exit_reason} !!! Closing position on {symbol}...")
-                    # Capture option LTP before exit to compute trade P&L
-                    pre_exit_opt_ltp = None
-                    try:
-                        opt_q = client.quotes(symbol=symbol, exchange=opt_exchange)
-                        if opt_q.get("status") == "success":
-                            pre_exit_opt_ltp = float(opt_q["data"]["ltp"])
-                    except Exception:
-                        pass
+                    # Capture option LTP before exit to compute trade P&L (validated against spot)
+                    pre_exit_opt_ltp = fetch_option_ltp(symbol, opt_exchange, underlying_ltp=underlying_ltp)
 
                     order_resp = client.placeorder(
                         strategy=STRATEGY_NAME,
@@ -547,14 +567,8 @@ def run_strategy():
                         time.sleep(15)
                         continue
 
-                    # Capture option entry price (needed for both P&L tracking and auto-lot)
-                    entry_opt_price = None
-                    try:
-                        opt_q = client.quotes(symbol=opt_symbol, exchange=opt_exchange)
-                        if opt_q.get("status") == "success":
-                            entry_opt_price = float(opt_q["data"]["ltp"])
-                    except Exception:
-                        pass
+                    # Capture option entry price (validated; needed for P&L + auto-lot)
+                    entry_opt_price = fetch_option_ltp(opt_symbol, opt_exchange, underlying_ltp=underlying_ltp)
 
                     # Compute entry quantity based on LOT_MODE
                     if LOT_MODE == "auto" and entry_opt_price is not None:

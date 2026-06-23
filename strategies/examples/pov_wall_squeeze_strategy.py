@@ -138,6 +138,30 @@ def compute_auto_lots(capital, risk_pct, max_loss_per_unit, lot_size, hard_cap_l
     auto_lots = int(risk_budget / max_loss_per_lot)
     return max(1, min(auto_lots, hard_cap_lots))
 
+def fetch_option_ltp(opt_symbol, opt_exchange, underlying_ltp=None, max_retries=3, retry_delay=1.0):
+    """Fetch option LTP with sanity check against underlying spot.
+
+    Brokers (notably Shoonya) can return the underlying spot value when the
+    option symbol's tick cache isn't populated yet (first quote after subscription).
+    Validates that the returned LTP isn't suspiciously close to the spot price.
+
+    Returns: float LTP on success, None on persistent failure.
+    """
+    for attempt in range(max_retries):
+        try:
+            q = client.quotes(symbol=opt_symbol, exchange=opt_exchange)
+            if q.get("status") == "success":
+                ltp = float(q["data"]["ltp"])
+                if underlying_ltp is None or ltp < underlying_ltp * 0.2:
+                    return ltp
+                log.warning(f"Option LTP {ltp:.2f} suspiciously close to spot {underlying_ltp:.2f} for {opt_symbol}; retry {attempt+1}/{max_retries}")
+        except Exception as e:
+            log.warning(f"Option LTP fetch failed for {opt_symbol}: {e}; retry {attempt+1}/{max_retries}")
+        if attempt < max_retries - 1:
+            time.sleep(retry_delay)
+    log.error(f"Failed to get valid option LTP for {opt_symbol} after {max_retries} attempts")
+    return None
+
 PRE_OI_MIN = 50000
 PRE_LOOKBACK = 4
 OI_ABS_THRESHOLD = 30000
@@ -540,14 +564,8 @@ def run_strategy():
                             log.info(f"Symbol {symbol} locked by another strategy. Skipping this signal.")
                             continue
 
-                        # Capture entry option price (needed for both P&L tracking and auto-lot)
-                        entry_opt_price = None
-                        try:
-                            opt_q = client.quotes(symbol=symbol, exchange=opt_exchange)
-                            if opt_q.get("status") == "success":
-                                entry_opt_price = float(opt_q["data"]["ltp"])
-                        except Exception:
-                            pass
+                        # Capture entry option price (validated; needed for P&L + auto-lot)
+                        entry_opt_price = fetch_option_ltp(symbol, opt_exchange, underlying_ltp=underlying_ltp)
 
                         # Compute entry quantity based on LOT_MODE
                         if LOT_MODE == "auto" and entry_opt_price is not None and res["sl"] is not None:
