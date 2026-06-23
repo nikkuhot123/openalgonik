@@ -401,7 +401,12 @@ def run_strategy():
                 target_spot = active_trade["target_spot"]
                 qty = active_trade["qty"]
 
-                log.info(f"Monitoring Trade: {symbol} | Spot: {underlying_ltp:.2f} | SL: {sl_spot:.2f} | Target: {target_spot:.2f}")
+                # Adopted orphans from prior sessions have no SL/target — log a marker and only do EOD exit
+                is_adopted = active_trade.get("adopted") and (sl_spot is None or target_spot is None)
+                if is_adopted:
+                    log.info(f"Monitoring (adopted) Trade: {symbol} | Spot: {underlying_ltp:.2f} | EOD-exit-only")
+                else:
+                    log.info(f"Monitoring Trade: {symbol} | Spot: {underlying_ltp:.2f} | SL: {sl_spot:.2f} | Target: {target_spot:.2f}")
 
                 exit_triggered = False
                 exit_reason = ""
@@ -409,6 +414,8 @@ def run_strategy():
                 if current_time >= EXIT_TIME:
                     exit_triggered = True
                     exit_reason = "EOD Squareoff (15:15)"
+                elif is_adopted:
+                    pass  # adopted orphan — defer to EOD; no SL/target known
                 elif direction == "CE":
                     if underlying_ltp <= sl_spot:
                         exit_triggered = True
