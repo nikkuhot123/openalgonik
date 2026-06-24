@@ -27,7 +27,7 @@ USE_ASYNC = not _is_eventlet_patched()
 logger = get_logger(__name__)
 
 
-def get_api_response(endpoint, auth, method="POST", payload=None):
+def get_api_response(endpoint, auth, method="POST", payload=None, timeout=None):
     """
     Common function to make API calls to Shoonya using httpx with connection pooling
     """
@@ -55,7 +55,7 @@ def get_api_response(endpoint, auth, method="POST", payload=None):
     }
     url = f"https://api.shoonya.com{endpoint}"
 
-    response = client.request(method, url, content=payload_str, headers=headers)
+    response = client.request(method, url, content=payload_str, headers=headers, timeout=timeout)
     data = response.text
 
     # Log response status and raw data for debugging
@@ -155,7 +155,7 @@ class BrokerData:
             payload = {"exch": exchange, "token": token}
 
             response = get_api_response(
-                "/NorenWClientAPI/GetQuotes", self.auth_token, payload=payload
+                "/NorenWClientAPI/GetQuotes", self.auth_token, payload=payload, timeout=5.0
             )
 
             if response.get("stat") != "Ok":
