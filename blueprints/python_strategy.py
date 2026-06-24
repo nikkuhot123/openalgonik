@@ -1382,7 +1382,7 @@ def cleanup_strategy_logs(strategy_id: str):
         retention_days = int(os.getenv("STRATEGY_LOG_RETENTION_DAYS", "7"))
 
         # Find all log files for this strategy, sorted by modification time (oldest first)
-        log_files = sorted(LOGS_DIR.glob(f"{strategy_id}_*.log"), key=lambda f: f.stat().st_mtime)
+        log_files = sorted(LOGS_DIR.glob(f"{strategy_id}_[0-9]*.log"), key=lambda f: f.stat().st_mtime)
 
         if not log_files:
             return
@@ -1987,7 +1987,7 @@ def view_logs(strategy_id):
 
     # Get all log files for this strategy
     try:
-        for log_file in LOGS_DIR.glob(f"{strategy_id}_*.log"):
+        for log_file in LOGS_DIR.glob(f"{strategy_id}_[0-9]*.log"):
             log_files.append(
                 {
                     "name": log_file.name,
@@ -2047,7 +2047,7 @@ def clear_logs(strategy_id):
         total_size = 0
 
         # Find all log files for this strategy
-        log_files = list(LOGS_DIR.glob(f"{strategy_id}_*.log"))
+        log_files = list(LOGS_DIR.glob(f"{strategy_id}_[0-9]*.log"))
 
         if not log_files:
             return jsonify({"status": "error", "message": "No log files found to clear"}), 404
@@ -2447,7 +2447,7 @@ def api_get_log_files(strategy_id):
     logs = []
     try:
         for log_file in sorted(
-            LOGS_DIR.glob(f"{strategy_id}_*.log"), key=lambda x: x.stat().st_mtime, reverse=True
+            LOGS_DIR.glob(f"{strategy_id}_[0-9]*.log"), key=lambda x: x.stat().st_mtime, reverse=True
         ):
             stats = log_file.stat()
             logs.append(
@@ -2775,7 +2775,7 @@ def api_get_strategy_status(strategy_id):
 
     # Find the latest log file for this strategy
     log_files = sorted(
-        LOGS_DIR.glob(f"{strategy_id}_*.log"),
+        LOGS_DIR.glob(f"{strategy_id}_[0-9]*.log"),
         key=lambda p: p.stat().st_mtime,
         reverse=True,
     )
@@ -3129,7 +3129,7 @@ def restore_strategy_states():
                         ist_now = get_ist_time()
 
                         # Find the current log file
-                        log_pattern = f"{strategy_id}_*_IST.log"
+                        log_pattern = f"{strategy_id}_[0-9]*_IST.log"
                         log_files = list(LOGS_DIR.glob(log_pattern))
                         current_log = (
                             max(log_files, key=lambda f: f.stat().st_mtime) if log_files else None
