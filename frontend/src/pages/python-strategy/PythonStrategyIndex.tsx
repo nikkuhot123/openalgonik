@@ -68,6 +68,11 @@ export default function PythonStrategyIndex() {
     }
   }
 
+  // Each strategy has a fixed underlying; the single Max Lots input must
+  // read/write the matching field (SENSEX -> max_lots_sensex, else max_lots_nifty).
+  const lotsFieldFor = (strategy: PythonStrategy): 'nifty' | 'sensex' =>
+    (strategy.underlying ?? 'NIFTY') === 'SENSEX' ? 'sensex' : 'nifty'
+
   const handleSettingsChange = (strategyId: string, field: string, value: string) => {
     setSettingsEdits(prev => {
       const current = prev[strategyId] ?? {}
@@ -561,8 +566,8 @@ export default function PythonStrategyIndex() {
                         min={1}
                         max={100}
                         className="h-7 text-xs font-mono"
-                        value={getSettings(strategy).nifty}
-                        onChange={(e) => handleSettingsChange(strategy.id, 'nifty', e.target.value)}
+                        value={getSettings(strategy)[lotsFieldFor(strategy)]}
+                        onChange={(e) => handleSettingsChange(strategy.id, lotsFieldFor(strategy), e.target.value)}
                         onBlur={() => handleSettingsSave(strategy)}
                         disabled={strategy.status === 'running'}
                       />
