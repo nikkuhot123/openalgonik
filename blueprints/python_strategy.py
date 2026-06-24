@@ -16,7 +16,8 @@ import re
 import subprocess
 import sys
 import threading
-from datetime import date, datetime, time
+import time
+from datetime import date, datetime
 from pathlib import Path
 
 import psutil
